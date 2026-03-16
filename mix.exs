@@ -97,7 +97,12 @@ defmodule CopilotLv.MixProject do
       {:ash_sqlite, "~> 0.2.15"},
       {:ash_phoenix, "~> 2.3"},
       {:yaml_elixir, "~> 2.11"},
-      {:tidewave, "~> 0.5", only: :dev}
+      {:tidewave, "~> 0.5", only: :dev},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:mix_audit, "~> 2.1", only: [:dev, :test]},
+      {:sobelow, "~> 0.13", only: [:dev, :test], runtime: false},
+      {:ex_slop, "~> 0.2", only: [:dev, :test], runtime: false}
+
     ]
   end
 
@@ -118,7 +123,7 @@ defmodule CopilotLv.MixProject do
         "phx.digest"
       ],
       # TODO: restore --warnings-as-errors once Ash type-checker warnings are resolved
-      precommit: ["compile", "deps.unlock --unused", "format", "test"]
+      precommit: ["compile", "deps.unlock --unused", "format", "credo", "sobelow", "test"]
     ]
   end
 end
