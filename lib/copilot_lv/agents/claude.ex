@@ -9,6 +9,8 @@ defmodule CopilotLv.Agents.Claude do
 
   @behaviour CopilotLv.Agents
 
+  require Logger
+
   @impl true
   def agent_type, do: :claude
 
@@ -192,9 +194,28 @@ defmodule CopilotLv.Agents.Claude do
     }
   end
 
+  @known_claude_types ~w(user assistant system result tool_use tool_result)a
+
   defp normalize_claude_message(%{"type" => type} = line) do
+    atom_type =
+      case type do
+        t when is_binary(t) ->
+          try do
+            String.to_existing_atom(t)
+          rescue
+            ArgumentError -> String.to_atom(t)
+          end
+
+        t ->
+          t
+      end
+
+    if atom_type not in @known_claude_types do
+      Logger.warning("Unknown Claude message type: #{inspect(type)}")
+    end
+
     %{
-      type: String.to_atom(type),
+      type: atom_type,
       text: nil,
       timestamp: parse_timestamp(line["timestamp"]),
       data: line

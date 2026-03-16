@@ -965,11 +965,8 @@ defmodule CopilotLv.SessionHandoff.Extractor do
         value
 
       :error ->
-        try do
-          Map.get(map, String.to_existing_atom(key))
-        rescue
-          ArgumentError -> nil
-        end
+        atom_key = safe_to_existing_atom(key)
+        if atom_key, do: Map.get(map, atom_key)
     end
   end
 
@@ -986,4 +983,10 @@ defmodule CopilotLv.SessionHandoff.Extractor do
   end
 
   defp blank_to_nil(value), do: value
+
+  defp safe_to_existing_atom(key) when is_binary(key) do
+    String.to_existing_atom(key)
+  rescue
+    ArgumentError -> nil
+  end
 end

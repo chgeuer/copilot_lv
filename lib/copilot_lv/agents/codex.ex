@@ -213,36 +213,33 @@ defmodule CopilotLv.Agents.Codex do
 
   @doc "Reads a thread row from a specific codex state DB path."
   def read_thread_raw(session_id, db_path) do
+    {:ok, conn} = Exqlite.Sqlite3.open(db_path, mode: :readonly)
+
     try do
-      {:ok, conn} = Exqlite.Sqlite3.open(db_path, mode: :readonly)
+      {:ok, stmt} =
+        Exqlite.Sqlite3.prepare(conn, "SELECT * FROM threads WHERE id = ?1")
 
-      try do
-        {:ok, stmt} =
-          Exqlite.Sqlite3.prepare(conn, "SELECT * FROM threads WHERE id = ?1")
+      :ok = Exqlite.Sqlite3.bind(stmt, [session_id])
+      {:ok, columns} = Exqlite.Sqlite3.columns(conn, stmt)
 
-        :ok = Exqlite.Sqlite3.bind(stmt, [session_id])
-        {:ok, columns} = Exqlite.Sqlite3.columns(conn, stmt)
+      result =
+        case Exqlite.Sqlite3.step(conn, stmt) do
+          {:row, values} ->
+            Enum.zip(columns, values) |> Map.new()
 
-        result =
-          case Exqlite.Sqlite3.step(conn, stmt) do
-            {:row, values} ->
-              Enum.zip(columns, values) |> Map.new()
+          :done ->
+            nil
+        end
 
-            :done ->
-              nil
-          end
-
-        Exqlite.Sqlite3.release(conn, stmt)
-        result
-      after
-        Exqlite.Sqlite3.close(conn)
-      end
-    rescue
-      e ->
-        Logger.warning("Failed to read codex thread for #{session_id}: #{Exception.message(e)}")
-
-        nil
+      Exqlite.Sqlite3.release(conn, stmt)
+      result
+    after
+      Exqlite.Sqlite3.close(conn)
     end
+  rescue
+    e in [Exqlite.Error, MatchError] ->
+      Logger.warning("Failed to read codex thread for #{session_id}: #{Exception.message(e)}")
+      nil
   end
 
   defp parse_thread_raw(raw) when is_map(raw) do

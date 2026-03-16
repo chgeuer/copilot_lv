@@ -102,7 +102,6 @@ defmodule CopilotLv.MixProject do
       {:mix_audit, "~> 2.1", only: [:dev, :test]},
       {:sobelow, "~> 0.13", only: [:dev, :test], runtime: false},
       {:ex_slop, "~> 0.2", only: [:dev, :test], runtime: false}
-
     ]
   end
 
