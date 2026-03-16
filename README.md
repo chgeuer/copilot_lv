@@ -4,6 +4,8 @@ A Phoenix LiveView dashboard for running, browsing, searching, and exporting AI 
 
 Supports sessions from **GitHub Copilot**, **Claude Code**, **OpenAI Codex**, and **Gemini CLI** — all in one unified interface.
 
+![screenshot](docs/screenshot.png)
+
 ## Features
 
 - **Multi-agent support** — Browse sessions from Copilot, Claude, Codex, and Gemini side-by-side
