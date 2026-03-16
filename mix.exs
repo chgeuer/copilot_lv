@@ -45,6 +45,14 @@ defmodule CopilotLv.MixProject do
   defp elixirc_paths(:test), do: ["lib", "test/support"]
   defp elixirc_paths(_), do: ["lib"]
 
+  defp jido_dep(name) do
+    if System.get_env("USER") == "chgeuer" do
+      [path: "/home/chgeuer/github/chgeuer/#{name}"]
+    else
+      [github: "chgeuer/#{name}"]
+    end
+  end
+
   # Specifies your project dependencies.
   #
   # Type `mix help deps` for examples and options.
@@ -71,8 +79,8 @@ defmodule CopilotLv.MixProject do
       {:jason, "~> 1.2"},
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
-      {:jido_ghcopilot, github: "chgeuer/jido_ghcopilot"},
-      {:jido_tool_renderers, github: "chgeuer/jido_tool_renderers"},
+      {:jido_ghcopilot, jido_dep("jido_ghcopilot")},
+      {:jido_tool_renderers, jido_dep("jido_tool_renderers")},
       {:jido_claude, github: "agentjido/jido_claude"},
       {:jido_codex, github: "agentjido/jido_codex"},
       {:jido_gemini, github: "agentjido/jido_gemini"},

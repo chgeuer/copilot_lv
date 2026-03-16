@@ -336,6 +336,15 @@ defmodule CopilotLv.SessionServer do
             state
         end
 
+      # Handle external tool calls (e.g. ask_user)
+      state =
+        if type == "external_tool.requested" do
+          handle_external_tool_request(state, data)
+          state
+        else
+          state
+        end
+
       # Broadcast event to LiveView subscribers
       broadcast(state, {:session_event, event})
 
@@ -344,6 +353,60 @@ defmodule CopilotLv.SessionServer do
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
+
+  defp handle_external_tool_request(state, data) do
+    tool_name = data["toolName"]
+    request_id = data["requestId"]
+    args = data["arguments"] || %{}
+
+    case tool_name do
+      "ask_user" ->
+        question = args["question"] || "Question from assistant"
+
+        choices =
+          case args["choices"] do
+            nil -> []
+            list when is_list(list) -> list
+            str when is_binary(str) -> String.split(str, ",") |> Enum.map(&String.trim/1)
+            _ -> []
+          end
+
+        allow_freeform = Map.get(args, "allow_freeform", true)
+        conn = state.conn
+        session_id = state.session_id
+        id = state.id
+
+        Task.start(fn ->
+          Phoenix.PubSub.broadcast(
+            CopilotLv.PubSub,
+            "session:#{id}",
+            {:ask_user_request,
+             %{
+               request_id: request_id,
+               question: question,
+               choices: choices,
+               allow_freeform: allow_freeform
+             }}
+          )
+
+          case CopilotLv.AskUserBroker.request(request_id, id, question, choices) do
+            {:ok, answer} ->
+              Connection.respond_to_external_tool(conn, session_id, request_id, answer)
+
+            {:error, :timeout} ->
+              Connection.respond_to_external_tool(
+                conn,
+                session_id,
+                request_id,
+                "User did not respond in time"
+              )
+          end
+        end)
+
+      _ ->
+        Logger.warning("Unhandled external tool: #{tool_name}")
+    end
+  end
 
   @impl true
   def terminate(_reason, %{conn: conn} = _state) when not is_nil(conn) do
