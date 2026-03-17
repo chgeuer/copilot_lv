@@ -7,7 +7,8 @@ defmodule CopilotLv.Sessions.Session do
     copilot: "gh",
     claude: "claude",
     codex: "codex",
-    gemini: "gemini"
+    gemini: "gemini",
+    pi: "pi"
   }
 
   @doc "Build a prefixed session ID from agent type and provider-specific ID."
@@ -52,7 +53,7 @@ defmodule CopilotLv.Sessions.Session do
     attribute(:hostname, :string)
 
     attribute(:agent, :atom,
-      constraints: [one_of: [:copilot, :claude, :codex, :gemini]],
+      constraints: [one_of: [:copilot, :claude, :codex, :gemini, :pi]],
       default: :copilot
     )
 

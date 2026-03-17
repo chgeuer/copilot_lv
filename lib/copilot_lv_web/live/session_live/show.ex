@@ -96,6 +96,7 @@ defmodule CopilotLvWeb.SessionLive.Show do
             :claude -> build_claude_stream_events(db_events)
             :codex -> build_codex_stream_events(db_events)
             :gemini -> build_gemini_stream_events(db_events)
+            :pi -> build_pi_stream_events(db_events)
             _ -> build_stream_events(db_events)
           end
 
@@ -841,6 +842,161 @@ defmodule CopilotLvWeb.SessionLive.Show do
       true ->
         nil
     end
+  end
+
+  # ── Pi event processing ──
+
+  defp build_pi_stream_events(events) do
+    flat =
+      events
+      |> Enum.reject(fn e ->
+        e.type in ["session", "model_change", "thinking_level_change"]
+      end)
+      |> Enum.flat_map(&pi_event_to_stream/1)
+      |> merge_pi_tool_results()
+
+    grouped = group_into_collapsible(flat)
+    {grouped, "", nil}
+  end
+
+  defp pi_event_to_stream(%{type: "message", data: data} = event) do
+    role = get_in(data, ["message", "role"])
+    content = get_in(data, ["message", "content"]) || []
+
+    case role do
+      "user" ->
+        text =
+          content
+          |> Enum.flat_map(fn
+            %{"type" => "text", "text" => t} when is_binary(t) -> [t]
+            _ -> []
+          end)
+          |> Enum.join("\n")
+
+        if String.trim(text) != "" do
+          [%{type: "user.message", data: %{"content" => text}, dom_id: event.dom_id}]
+        else
+          []
+        end
+
+      "assistant" ->
+        Enum.flat_map(content, fn
+          %{"type" => "thinking", "thinking" => thinking}
+          when is_binary(thinking) and thinking != "" ->
+            [
+              %{
+                type: "assistant.reasoning",
+                data: %{"content" => thinking},
+                dom_id: "pi-thinking-#{System.unique_integer([:positive])}"
+              }
+            ]
+
+          %{"type" => "text", "text" => text}
+          when is_binary(text) and text != "" ->
+            [
+              %{
+                type: "assistant.message.block",
+                data: %{"content" => text},
+                dom_id: "pi-text-#{System.unique_integer([:positive])}"
+              }
+            ]
+
+          %{"type" => "toolCall", "name" => name, "id" => id} = call ->
+            [
+              %{
+                type: "tool.combined",
+                data: %{
+                  "toolName" => name,
+                  "toolCallId" => id,
+                  "arguments" => call["arguments"] || %{},
+                  "completed" => false
+                },
+                dom_id: "pi-tool-#{id}"
+              }
+            ]
+
+          _ ->
+            []
+        end)
+
+      "toolResult" ->
+        tool_call_id = get_in(data, ["message", "toolCallId"])
+        tool_name = get_in(data, ["message", "toolName"])
+        is_error = get_in(data, ["message", "isError"]) == true
+
+        result_text =
+          content
+          |> Enum.flat_map(fn
+            %{"type" => "text", "text" => t} when is_binary(t) -> [t]
+            _ -> []
+          end)
+          |> Enum.join("\n")
+
+        [
+          %{
+            type: "tool.execution_complete",
+            data: %{
+              "toolCallId" => tool_call_id,
+              "toolName" => tool_name,
+              "result" => result_text,
+              "success" => !is_error,
+              "error" => if(is_error, do: result_text)
+            },
+            dom_id: "pi-tool-result-#{tool_call_id || System.unique_integer([:positive])}"
+          }
+        ]
+
+      _ ->
+        []
+    end
+  end
+
+  defp pi_event_to_stream(_event), do: []
+
+  defp merge_pi_tool_results(events) do
+    outputs =
+      events
+      |> Enum.filter(&(&1.type == "tool.execution_complete"))
+      |> Map.new(&{&1.data["toolCallId"], &1.data})
+
+    Enum.flat_map(events, fn event ->
+      case event.type do
+        "tool.combined" ->
+          case Map.get(outputs, event.data["toolCallId"]) do
+            nil ->
+              [event]
+
+            output_data ->
+              [
+                %{
+                  event
+                  | data:
+                      Map.merge(event.data, %{
+                        "completed" => true,
+                        "success" => output_data["success"],
+                        "result" => output_data["result"],
+                        "error" => output_data["error"]
+                      })
+                }
+              ]
+          end
+
+        "tool.execution_complete" ->
+          if Map.has_key?(outputs, event.data["toolCallId"]) &&
+               Enum.any?(
+                 events,
+                 &(&1.type == "tool.combined" &&
+                     &1.data["toolCallId"] == event.data["toolCallId"])
+               ) do
+            []
+          else
+            [event]
+          end
+
+        _ ->
+          [event]
+      end
+    end)
   end
 
   @impl true

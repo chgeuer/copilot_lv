@@ -80,6 +80,7 @@ defmodule CopilotLv.MixProject do
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
       {:jido_ghcopilot, jido_dep("jido_ghcopilot")},
+      {:jido_pi, jido_dep("jido_pi")},
       {:jido_tool_renderers, jido_dep("jido_tool_renderers")},
       {:jido_claude, github: "agentjido/jido_claude"},
       {:jido_codex, github: "agentjido/jido_codex"},

@@ -29,7 +29,7 @@ defmodule CopilotLv.Agents do
         }
 
   @doc "Returns the agent type atom."
-  @callback agent_type() :: :copilot | :claude | :codex | :gemini
+  @callback agent_type() :: :copilot | :claude | :codex | :gemini | :pi
 
   @doc "Returns a list of well-known directories where this agent stores sessions."
   @callback well_known_dirs() :: [String.t()]
@@ -59,7 +59,8 @@ defmodule CopilotLv.Agents do
       CopilotLv.Agents.Copilot,
       CopilotLv.Agents.Claude,
       CopilotLv.Agents.Codex,
-      CopilotLv.Agents.Gemini
+      CopilotLv.Agents.Gemini,
+      CopilotLv.Agents.Pi
     ]
   end
 
@@ -68,6 +69,7 @@ defmodule CopilotLv.Agents do
   def for_type(:claude), do: CopilotLv.Agents.Claude
   def for_type(:codex), do: CopilotLv.Agents.Codex
   def for_type(:gemini), do: CopilotLv.Agents.Gemini
+  def for_type(:pi), do: CopilotLv.Agents.Pi
   def for_type(_), do: nil
 
   @doc "Parses a session file using the appropriate agent parser."
@@ -75,6 +77,7 @@ defmodule CopilotLv.Agents do
   def parse_session(:claude, path), do: CopilotLv.Agents.Claude.parse_session(path)
   def parse_session(:codex, path), do: CopilotLv.Agents.Codex.parse_session(path)
   def parse_session(:gemini, path), do: CopilotLv.Agents.Gemini.parse_session(path)
+  def parse_session(:pi, path), do: CopilotLv.Agents.Pi.parse_session(path)
   def parse_session(_, _), do: {:error, :unknown_agent}
 
   @doc "Discovers sessions across all agents, or a specific one, in well-known dirs."

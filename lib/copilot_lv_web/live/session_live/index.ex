@@ -119,7 +119,7 @@ defmodule CopilotLvWeb.SessionLive.Index do
 
       # Sync all other agents locally
       agent_stats =
-        [:claude, :codex, :gemini]
+        [:claude, :codex, :gemini, :pi]
         |> Enum.map(&CopilotLv.AgentDiscovery.import_local(&1, []))
         |> Enum.reduce(%{imported: 0, repaired: 0, skipped: 0, errors: 0}, fn s, acc ->
           %{
@@ -469,11 +469,13 @@ defmodule CopilotLvWeb.SessionLive.Index do
   defp agent_badge_class(:claude), do: "badge-warning"
   defp agent_badge_class(:codex), do: "badge-info"
   defp agent_badge_class(:gemini), do: "badge-success"
+  defp agent_badge_class(:pi), do: "badge-secondary"
   defp agent_badge_class(_), do: "badge-ghost"
 
   defp agent_cli_hint("claude", cwd), do: "cd #{cwd} && claude"
   defp agent_cli_hint("codex", cwd), do: "cd #{cwd} && codex"
   defp agent_cli_hint("gemini", cwd), do: "cd #{cwd} && gemini"
+  defp agent_cli_hint("pi", cwd), do: "cd #{cwd} && pi"
   defp agent_cli_hint(_, cwd), do: "cd #{cwd}"
 
   defp shorten_path(path) do
@@ -521,7 +523,8 @@ defmodule CopilotLvWeb.SessionLive.Index do
                     {"copilot", "🤖", "Copilot"},
                     {"claude", "🟠", "Claude"},
                     {"codex", "🔵", "Codex"},
-                    {"gemini", "🟢", "Gemini"}
+                    {"gemini", "🟢", "Gemini"},
+                    {"pi", "🟣", "Pi"}
                   ] do %>
                     <button
                       type="button"
