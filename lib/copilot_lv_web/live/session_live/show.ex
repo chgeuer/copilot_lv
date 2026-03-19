@@ -173,6 +173,10 @@ defmodule CopilotLvWeb.SessionLive.Show do
                        "permission.requested",
                        "permission.completed",
                        "tool.user_requested",
+                       "tool.execution_partial_result",
+                       "external_tool.completed",
+                       "session.background_tasks_changed",
+                       "session.tools_updated",
                        "pending_messages.modified"
                      ])
 
@@ -187,6 +191,22 @@ defmodule CopilotLvWeb.SessionLive.Show do
       |> Enum.reduce({[], "", nil, nil, %{}}, fn event, {acc, text, msg_id, msg_idx, pending} ->
         case event.type do
           "assistant.message" ->
+            reasoning = event.data["reasoningText"]
+
+            acc =
+              if is_binary(reasoning) and String.trim(reasoning) != "" do
+                acc ++
+                  [
+                    %{
+                      type: "assistant.reasoning",
+                      data: %{"content" => reasoning},
+                      dom_id: "copilot-reasoning-#{System.unique_integer([:positive])}"
+                    }
+                  ]
+              else
+                acc
+              end
+
             chunk = event.data["chunkContent"] || event.data["content"] || ""
             new_text = text <> chunk
             new_id = msg_id || "assistant-msg-replay-#{System.unique_integer([:positive])}"
@@ -1408,6 +1428,21 @@ defmodule CopilotLvWeb.SessionLive.Show do
 
       # Accumulate assistant.message chunks into a single markdown block
       type == "assistant.message" ->
+        reasoning = data["reasoningText"]
+
+        socket =
+          if is_binary(reasoning) and String.trim(reasoning) != "" do
+            reasoning_event = %{
+              type: "assistant.reasoning",
+              data: %{"content" => reasoning},
+              dom_id: "copilot-reasoning-#{System.unique_integer([:positive])}"
+            }
+
+            add_to_tool_group(socket, reasoning_event)
+          else
+            socket
+          end
+
         chunk = data["chunkContent"] || data["content"] || ""
         new_text = socket.assigns.assistant_text <> chunk
 
