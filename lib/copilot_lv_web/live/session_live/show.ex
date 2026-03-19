@@ -607,24 +607,6 @@ defmodule CopilotLvWeb.SessionLive.Show do
     end)
   end
 
-  defp insert_event(socket, event) do
-    dom_id = "ev-#{map_get(event, :id) || System.unique_integer([:positive])}"
-
-    event_map =
-      case event do
-        %{__struct__: _} -> Map.from_struct(event)
-        map when is_map(map) -> map
-      end
-      |> Map.put(:dom_id, dom_id)
-
-    socket =
-      socket
-      |> track_terminal_event(event_map)
-      |> stream_insert(:events, event_map, at: -1)
-
-    {:noreply, push_event(socket, "scroll-bottom", %{})}
-  end
-
   defp track_terminal_event(socket, event_map) do
     terminal_events = socket.assigns.terminal_events ++ [event_map]
     socket = assign(socket, :terminal_events, terminal_events)
