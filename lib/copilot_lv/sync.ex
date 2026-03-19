@@ -4,6 +4,8 @@ defmodule CopilotLv.Sync do
   Extracted from Mix.Tasks.Copilot.Sync for reuse in LiveView.
   """
 
+  alias CopilotLv.SessionStoreImpl
+
   @session_state_dirs [
     Path.join(System.user_home!(), ".copilot/session-state"),
     Path.join(System.user_home!(), ".local/state/.copilot/session-state")
@@ -137,10 +139,7 @@ defmodule CopilotLv.Sync do
   end
 
   defp load_existing_session_ids do
-    sessions =
-      CopilotLv.Sessions.Session
-      |> Ash.Query.for_read(:list_all)
-      |> Ash.read!()
+    sessions = SessionStoreImpl.list_sessions([])
 
     # Extract provider IDs from prefixed session IDs for copilot sessions
     all_ids =
@@ -203,22 +202,7 @@ defmodule CopilotLv.Sync do
           |> String.slice(0, 120)
         end
 
-      session_attrs = %{
-        id: CopilotLv.Sessions.Session.prefixed_id(:copilot, session_id),
-        cwd: workspace["cwd"] || context["cwd"] || "unknown",
-        model: get_in(session_start, ["data", "selectedModel"]),
-        summary: summary,
-        title: title,
-        git_root: workspace["git_root"] || context["gitRoot"],
-        branch: workspace["branch"] || context["branch"],
-        copilot_version: get_in(session_start, ["data", "copilotVersion"]),
-        source: :imported,
-        status: :stopped,
-        started_at: parse_timestamp(workspace["created_at"] || session_start["timestamp"]),
-        stopped_at: parse_timestamp(workspace["updated_at"]),
-        imported_at: DateTime.utc_now(),
-        event_count: length(raw_events)
-      }
+      prefixed_id = CopilotLv.Sessions.Session.prefixed_id(:copilot, session_id)
 
       if dry_run do
         checkpoints = read_checkpoints(dir_path)
@@ -226,18 +210,31 @@ defmodule CopilotLv.Sync do
         todos = read_session_todos(dir_path)
         {:imported, length(raw_events), length(checkpoints), length(artifacts), length(todos)}
       else
-        session =
-          CopilotLv.Sessions.Session
-          |> Ash.Changeset.for_create(:import, session_attrs)
-          |> Ash.create!()
+        jido_session = %JidoSessions.Session{
+          id: prefixed_id,
+          agent: :copilot,
+          source: :imported,
+          status: :stopped,
+          cwd: workspace["cwd"] || context["cwd"] || "unknown",
+          model: get_in(session_start, ["data", "selectedModel"]),
+          summary: summary,
+          title: title,
+          git_root: workspace["git_root"] || context["gitRoot"],
+          branch: workspace["branch"] || context["branch"],
+          agent_version: get_in(session_start, ["data", "copilotVersion"]),
+          started_at: parse_timestamp(workspace["created_at"] || session_start["timestamp"]),
+          stopped_at: parse_timestamp(workspace["updated_at"])
+        }
 
-        event_count = import_events(session.id, raw_events)
+        {:ok, _} = SessionStoreImpl.upsert_session(jido_session)
+
+        event_count = import_events(prefixed_id, raw_events)
         checkpoints = read_checkpoints(dir_path)
-        cp_count = import_checkpoints(session.id, checkpoints)
+        cp_count = import_checkpoints(prefixed_id, checkpoints)
         artifacts = read_artifacts(dir_path)
-        art_count = import_artifacts(session.id, artifacts)
+        art_count = import_artifacts(prefixed_id, artifacts)
         todos = read_session_todos(dir_path)
-        todo_count = import_session_todos(session.id, todos)
+        todo_count = import_session_todos(prefixed_id, todos)
         {:imported, event_count, cp_count, art_count, todo_count}
       end
     end
@@ -246,74 +243,62 @@ defmodule CopilotLv.Sync do
   defp sync_existing_session(session_id, dir_path, workspace, dry_run) do
     events_path = Path.join(dir_path, "events.jsonl")
     raw_events = read_events(events_path)
+    prefixed_id = CopilotLv.Sessions.Session.prefixed_id(:copilot, session_id)
 
-    existing =
-      case Ash.get(
-             CopilotLv.Sessions.Session,
-             CopilotLv.Sessions.Session.prefixed_id(:copilot, session_id)
-           ) do
-        {:ok, session} -> session
-        _ -> nil
-      end
+    case SessionStoreImpl.get_session(prefixed_id) do
+      {:ok, existing} ->
+        existing_event_count = SessionStoreImpl.event_count(prefixed_id)
+        _new_event_count = length(raw_events)
 
-    if is_nil(existing) do
-      :skipped
-    else
-      existing_event_count = existing.event_count || 0
-      new_event_count = length(raw_events)
+        summary = workspace["summary"] || existing.summary
 
-      summary = workspace["summary"] || existing.summary
-
-      title =
-        if summary do
-          summary
-          |> String.split("\n")
-          |> hd()
-          |> String.trim_leading("# ")
-          |> String.trim()
-          |> String.slice(0, 120)
-        else
-          existing.title
-        end
-
-      # Always sync artifacts and todos for existing sessions (idempotent upsert)
-      artifacts = read_artifacts(dir_path)
-      todos = read_session_todos(dir_path)
-
-      if dry_run do
-        new_events = Enum.drop(raw_events, existing_event_count)
-        {:updated, length(new_events), 0, length(artifacts), length(todos)}
-      else
-        new_events = Enum.drop(raw_events, existing_event_count)
-
-        event_count =
-          if new_events != [] do
-            import_events(existing.id, new_events, existing_event_count)
+        title =
+          if summary do
+            summary
+            |> String.split("\n")
+            |> hd()
+            |> String.trim_leading("# ")
+            |> String.trim()
+            |> String.slice(0, 120)
           else
-            0
+            existing.title
           end
 
-        art_count = import_artifacts(existing.id, artifacts)
-        todo_count = import_session_todos(existing.id, todos)
+        # Always sync artifacts and todos for existing sessions (idempotent upsert)
+        artifacts = read_artifacts(dir_path)
+        todos = read_session_todos(dir_path)
 
-        # Always update event_count and metadata for consistency
-        existing
-        |> Ash.Changeset.for_update(:update_import, %{
-          summary: summary,
-          title: title,
-          event_count: new_event_count,
-          imported_at: DateTime.utc_now()
-        })
-        |> Ash.update!()
-
-        has_changes = event_count > 0 || art_count > 0 || todo_count > 0
-
-        if has_changes do
-          {:updated, event_count, 0, art_count, todo_count}
+        if dry_run do
+          new_events = Enum.drop(raw_events, existing_event_count)
+          {:updated, length(new_events), 0, length(artifacts), length(todos)}
         else
-          :skipped
+          new_events = Enum.drop(raw_events, existing_event_count)
+
+          event_count =
+            if new_events != [] do
+              import_events(prefixed_id, new_events, existing_event_count)
+            else
+              0
+            end
+
+          art_count = import_artifacts(prefixed_id, artifacts)
+          todo_count = import_session_todos(prefixed_id, todos)
+
+          # Update session metadata
+          updated_session = %JidoSessions.Session{existing | summary: summary, title: title}
+          SessionStoreImpl.upsert_session(updated_session)
+
+          has_changes = event_count > 0 || art_count > 0 || todo_count > 0
+
+          if has_changes do
+            {:updated, event_count, 0, art_count, todo_count}
+          else
+            :skipped
+          end
         end
-      end
+
+      {:error, :not_found} ->
+        :skipped
     end
   end
 
@@ -578,30 +563,27 @@ defmodule CopilotLv.Sync do
     else
       session_start = List.first(raw_events)
       context = get_in(session_start, ["data", "context"]) || %{}
-
-      session_attrs = %{
-        id: CopilotLv.Sessions.Session.prefixed_id(:copilot, session_id),
-        cwd: context["cwd"] || "unknown",
-        model: get_in(session_start, ["data", "selectedModel"]),
-        git_root: context["gitRoot"],
-        branch: context["branch"],
-        copilot_version: get_in(session_start, ["data", "copilotVersion"]),
-        source: :imported,
-        status: :stopped,
-        started_at: parse_timestamp(session_start["timestamp"]),
-        imported_at: DateTime.utc_now(),
-        event_count: length(raw_events)
-      }
+      prefixed_id = CopilotLv.Sessions.Session.prefixed_id(:copilot, session_id)
 
       if dry_run do
         {:imported, length(raw_events)}
       else
-        session =
-          CopilotLv.Sessions.Session
-          |> Ash.Changeset.for_create(:import, session_attrs)
-          |> Ash.create!()
+        jido_session = %JidoSessions.Session{
+          id: prefixed_id,
+          agent: :copilot,
+          source: :imported,
+          status: :stopped,
+          cwd: context["cwd"] || "unknown",
+          model: get_in(session_start, ["data", "selectedModel"]),
+          git_root: context["gitRoot"],
+          branch: context["branch"],
+          agent_version: get_in(session_start, ["data", "copilotVersion"]),
+          started_at: parse_timestamp(session_start["timestamp"])
+        }
 
-        event_count = import_events(session.id, raw_events)
+        {:ok, _} = SessionStoreImpl.upsert_session(jido_session)
+
+        event_count = import_events(prefixed_id, raw_events)
         {:imported, event_count}
       end
     end
@@ -610,79 +592,88 @@ defmodule CopilotLv.Sync do
   # ── Data Import ──
 
   defp import_events(session_id, raw_events, offset \\ 0) do
-    repo = CopilotLv.Repo
+    entries =
+      raw_events
+      |> Enum.with_index(offset + 1)
+      |> Enum.map(fn {event, seq} ->
+        %{
+          type: event["type"] || "unknown",
+          data: event["data"] || %{},
+          timestamp: parse_timestamp(event["timestamp"]),
+          sequence: seq,
+          event_id: event["id"],
+          parent_event_id: event["parentId"]
+        }
+      end)
 
-    raw_events
-    |> Enum.with_index(offset + 1)
-    |> Enum.chunk_every(500)
-    |> Enum.each(fn chunk ->
-      entries =
-        Enum.map(chunk, fn {event, seq} ->
-          %{
-            id: Ash.UUIDv7.generate(),
-            event_type: event["type"] || "unknown",
-            event_id: event["id"],
-            parent_event_id: event["parentId"],
-            data: Jason.encode!(event["data"] || %{}),
-            timestamp: parse_timestamp(event["timestamp"]),
-            sequence: seq,
-            session_id: session_id
-          }
-        end)
-
-      repo.insert_all("events", entries,
-        log: false,
-        on_conflict: :nothing,
-        conflict_target: [:session_id, :sequence]
-      )
-    end)
-
+    {:ok, _count} = SessionStoreImpl.insert_events(session_id, entries)
     length(raw_events)
   end
 
   defp import_checkpoints(session_id, checkpoints) do
-    Enum.each(checkpoints, fn cp ->
-      CopilotLv.Sessions.Checkpoint
-      |> Ash.Changeset.for_create(:create, %{
-        session_id: session_id,
-        number: cp.number,
-        title: cp.title,
-        filename: cp.filename,
-        content: cp.content
-      })
-      |> Ash.create!()
-    end)
+    unless Enum.empty?(checkpoints) do
+      cp_structs =
+        Enum.map(checkpoints, fn cp ->
+          %JidoSessions.Checkpoint{
+            number: cp.number,
+            title: cp.title,
+            filename: cp.filename,
+            content: cp.content
+          }
+        end)
+
+      SessionStoreImpl.insert_checkpoints(session_id, cp_structs)
+    end
 
     length(checkpoints)
   end
 
   defp import_artifacts(session_id, artifacts) do
-    Enum.count(artifacts, fn artifact ->
-      changeset =
-        CopilotLv.Sessions.SessionArtifact
-        |> Ash.Changeset.for_create(:upsert, Map.put(artifact, :session_id, session_id))
+    unless Enum.empty?(artifacts) do
+      art_structs =
+        Enum.map(artifacts, fn art ->
+          %JidoSessions.Artifact{
+            path: art.path,
+            artifact_type: art.artifact_type,
+            content: art.content,
+            content_hash: art.content_hash,
+            size: art.size
+          }
+        end)
 
-      case Ash.create(changeset) do
-        {:ok, _} -> true
-        {:error, _} -> false
-      end
-    end)
+      SessionStoreImpl.upsert_artifacts(session_id, art_structs)
+    end
+
+    length(artifacts)
   end
 
   defp import_session_todos(session_id, todos) do
-    Enum.count(todos, fn todo ->
-      changeset =
-        CopilotLv.Sessions.SessionTodo
-        |> Ash.Changeset.for_create(:upsert, Map.put(todo, :session_id, session_id))
+    unless Enum.empty?(todos) do
+      todo_structs =
+        Enum.map(todos, fn todo ->
+          %JidoSessions.Todo{
+            todo_id: todo.todo_id,
+            title: todo.title,
+            description: todo.description,
+            status: parse_todo_status(todo.status),
+            depends_on: todo.depends_on || []
+          }
+        end)
 
-      case Ash.create(changeset) do
-        {:ok, _} -> true
-        {:error, _} -> false
-      end
-    end)
+      SessionStoreImpl.upsert_todos(session_id, todo_structs)
+    end
+
+    length(todos)
   end
 
   # ── Helpers ──
+
+  defp parse_todo_status("pending"), do: :pending
+  defp parse_todo_status("in_progress"), do: :in_progress
+  defp parse_todo_status("done"), do: :done
+  defp parse_todo_status("blocked"), do: :blocked
+  defp parse_todo_status(status) when is_atom(status), do: status
+  defp parse_todo_status(_), do: :pending
 
   defp parse_timestamp(nil), do: nil
 

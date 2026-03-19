@@ -11,6 +11,7 @@ defmodule CopilotLv.SessionWatcher do
   use GenServer
   require Logger
 
+  alias CopilotLv.SessionStoreImpl
   alias Phoenix.PubSub
 
   @pubsub_topic "sessions:watcher"
@@ -268,116 +269,60 @@ defmodule CopilotLv.SessionWatcher do
       state
   end
 
-  defp upsert_session(agent_type, session_id, session_path, parsed) do
-    alias CopilotLv.Sessions.Session
-    prefixed_id = Session.prefixed_id(agent_type, session_id)
+  defp upsert_session(agent_type, session_id, _session_path, parsed) do
+    prefixed_id = CopilotLv.Sessions.Session.prefixed_id(agent_type, session_id)
     hostname = local_hostname()
 
-    case Ash.get(Session, prefixed_id) do
-      {:ok, existing} ->
-        # Incremental event append
-        import_events(existing.id, parsed.events)
+    # For updates, merge with existing values to avoid overwriting with nil
+    existing =
+      case SessionStoreImpl.get_session(prefixed_id) do
+        {:ok, s} -> s
+        _ -> nil
+      end
 
-        existing
-        |> Ash.Changeset.for_update(:update_import, %{
-          summary: parsed.summary || existing.summary,
-          title: parsed.title || existing.title,
-          event_count: max(length(parsed.events), existing.event_count || 0),
-          imported_at: DateTime.utc_now(),
-          hostname: hostname,
-          agent: agent_type,
-          branch: parsed.branch || existing.branch,
-          git_root: parsed.git_root || existing.git_root,
-          model: parsed.model || existing.model,
-          stopped_at: parsed.stopped_at || existing.stopped_at
-        })
-        |> Ash.update!()
+    jido_session = %JidoSessions.Session{
+      id: prefixed_id,
+      agent: agent_type,
+      source: :imported,
+      status: :stopped,
+      cwd: parsed.cwd || (existing && existing.cwd) || "unknown",
+      model: parsed.model || (existing && existing.model),
+      summary: parsed.summary || (existing && existing.summary),
+      title: parsed.title || (existing && existing.title),
+      git_root: parsed.git_root || (existing && existing.git_root),
+      branch: parsed.branch || (existing && existing.branch),
+      agent_version: parsed.agent_version || (existing && existing.agent_version),
+      started_at: parsed.started_at || (existing && existing.started_at),
+      stopped_at: parsed.stopped_at || (existing && existing.stopped_at),
+      hostname: hostname
+    }
 
-        :updated
+    result = if existing, do: :updated, else: :imported
+
+    case SessionStoreImpl.upsert_session(jido_session) do
+      {:ok, _} ->
+        import_events(prefixed_id, parsed.events)
+        result
 
       {:error, _} ->
-        # New session
-        config_dir =
-          case agent_type do
-            :copilot ->
-              if is_binary(session_path) &&
-                   String.contains?(session_path, ".copilot/session-state") do
-                # session_path is either a dir or a .jsonl file inside session-state
-                parent =
-                  if File.dir?(session_path),
-                    do: Path.dirname(session_path),
-                    else: Path.dirname(session_path)
-
-                parent
-              else
-                Path.expand("~/.copilot/session-state")
-              end
-
-            :claude ->
-              Path.expand("~/.claude/projects")
-
-            :codex ->
-              Path.expand("~/.codex/sessions")
-
-            :gemini ->
-              Path.expand("~/.gemini/tmp")
-          end
-
-        session_attrs = %{
-          id: prefixed_id,
-          cwd: parsed.cwd || "unknown",
-          model: parsed.model,
-          summary: parsed.summary,
-          title: parsed.title,
-          git_root: parsed.git_root,
-          branch: parsed.branch,
-          copilot_version: parsed.agent_version,
-          source: :imported,
-          status: :stopped,
-          started_at: parsed.started_at,
-          stopped_at: parsed.stopped_at,
-          imported_at: DateTime.utc_now(),
-          event_count: length(parsed.events),
-          hostname: hostname,
-          agent: agent_type,
-          config_dir: config_dir
-        }
-
-        Session
-        |> Ash.Changeset.for_create(:import, session_attrs)
-        |> Ash.create!()
-
-        import_events(prefixed_id, parsed.events)
-        :imported
+        :error
     end
   end
 
   defp import_events(session_id, events) do
-    repo = CopilotLv.Repo
+    entries =
+      Enum.map(events, fn event ->
+        %{
+          type: event.type,
+          data: event.data || %{},
+          timestamp: event.timestamp,
+          sequence: event.sequence,
+          event_id: nil,
+          parent_event_id: nil
+        }
+      end)
 
-    events
-    |> Enum.chunk_every(500)
-    |> Enum.each(fn chunk ->
-      entries =
-        Enum.map(chunk, fn event ->
-          %{
-            id: Ash.UUIDv7.generate(),
-            event_type: event.type,
-            event_id: nil,
-            parent_event_id: nil,
-            data: Jason.encode!(event.data || %{}),
-            timestamp: event.timestamp,
-            sequence: event.sequence,
-            session_id: session_id
-          }
-        end)
-
-      repo.insert_all("events", entries,
-        log: false,
-        on_conflict: :nothing,
-        conflict_target: [:session_id, :sequence]
-      )
-    end)
+    SessionStoreImpl.insert_events(session_id, entries)
   end
 
   defp do_full_scan(state) do
@@ -445,9 +390,10 @@ defmodule CopilotLv.SessionWatcher do
   end
 
   defp load_known_counts do
-    CopilotLv.Sessions.Session
-    |> Ash.read!()
-    |> Map.new(&{&1.id, &1.event_count || 0})
+    SessionStoreImpl.list_sessions([])
+    |> Map.new(fn session ->
+      {session.id, SessionStoreImpl.event_count(session.id)}
+    end)
   rescue
     _ -> %{}
   end

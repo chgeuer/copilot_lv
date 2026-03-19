@@ -5,6 +5,8 @@ defmodule CopilotLv.AgentDiscovery do
 
   require Logger
 
+  alias CopilotLv.SessionStoreImpl
+
   @doc """
   Discover sessions on the local machine.
   Returns `[{agent_type, session_id, path, config_dir}]`.
@@ -173,9 +175,7 @@ defmodule CopilotLv.AgentDiscovery do
   # ── Internal ──
 
   defp delete_session_data(session) do
-    repo = CopilotLv.Repo
-    repo.query!("DELETE FROM events WHERE session_id = ?1", [session.id])
-    Ash.destroy!(session)
+    SessionStoreImpl.delete_session(session.id)
   end
 
   defp import_new(agent_type, session_id, path, config_dir, hostname, dry_run, verbose, stats) do
@@ -214,7 +214,7 @@ defmodule CopilotLv.AgentDiscovery do
     case CopilotLv.Agents.parse_session(agent_type, path) do
       {:ok, parsed} ->
         source_count = length(parsed.events)
-        db_count = existing_session.event_count || 0
+        db_count = SessionStoreImpl.event_count(existing_session.id)
         has_new_events = source_count > db_count
 
         has_metadata_changes =
@@ -270,59 +270,57 @@ defmodule CopilotLv.AgentDiscovery do
     end
   end
 
-  defp repair_session(existing_session, parsed, agent_type, config_dir, hostname) do
-    # Incremental: insert new events only (on_conflict: :nothing handles idempotency)
+  defp repair_session(
+         %JidoSessions.Session{} = existing_session,
+         parsed,
+         agent_type,
+         _config_dir,
+         hostname
+       ) do
+    # Incremental event append (on_conflict: :nothing handles idempotency)
     import_events(existing_session.id, parsed.events)
 
     # Store/update codex thread metadata artifact
     provider_id = CopilotLv.Sessions.Session.provider_id(existing_session.id)
     store_codex_thread_meta(agent_type, provider_id, existing_session.id)
 
-    # Update session metadata
-    existing_session
-    |> Ash.Changeset.for_update(:update_import, %{
-      summary: parsed.summary || existing_session.summary,
-      title: parsed.title || existing_session.title,
-      event_count: max(length(parsed.events), existing_session.event_count || 0),
-      imported_at: DateTime.utc_now(),
-      hostname: hostname,
-      agent: agent_type,
-      config_dir: config_dir,
-      branch: parsed.branch || existing_session.branch,
-      git_root: parsed.git_root || existing_session.git_root,
-      model: parsed.model || existing_session.model,
-      stopped_at: parsed.stopped_at || existing_session.stopped_at
-    })
-    |> Ash.update!()
+    # Update session metadata via SessionStoreImpl
+    updated_session = %JidoSessions.Session{
+      existing_session
+      | agent: agent_type,
+        summary: parsed.summary || existing_session.summary,
+        title: parsed.title || existing_session.title,
+        git_root: parsed.git_root || existing_session.git_root,
+        branch: parsed.branch || existing_session.branch,
+        model: parsed.model || existing_session.model,
+        stopped_at: parsed.stopped_at || existing_session.stopped_at,
+        hostname: hostname
+    }
+
+    SessionStoreImpl.upsert_session(updated_session)
   end
 
-  defp do_import(parsed, agent_type, hostname, config_dir) do
-    alias CopilotLv.Sessions.Session
-    id = Session.prefixed_id(agent_type, parsed.session_id)
+  defp do_import(parsed, agent_type, hostname, _config_dir) do
+    id = CopilotLv.Sessions.Session.prefixed_id(agent_type, parsed.session_id)
 
-    session_attrs = %{
+    jido_session = %JidoSessions.Session{
       id: id,
+      agent: agent_type,
+      source: :imported,
+      status: :stopped,
       cwd: parsed.cwd || "unknown",
       model: parsed.model,
       summary: parsed.summary,
       title: parsed.title,
       git_root: parsed.git_root,
       branch: parsed.branch,
-      copilot_version: parsed.agent_version,
-      source: :imported,
-      status: :stopped,
+      agent_version: parsed.agent_version,
       started_at: parsed.started_at,
       stopped_at: parsed.stopped_at,
-      imported_at: DateTime.utc_now(),
-      event_count: length(parsed.events),
-      hostname: hostname,
-      agent: agent_type,
-      config_dir: config_dir
+      hostname: hostname
     }
 
-    case CopilotLv.Sessions.Session
-         |> Ash.Changeset.for_create(:import, session_attrs)
-         |> Ash.create() do
+    case SessionStoreImpl.upsert_session(jido_session) do
       {:ok, session} ->
         import_events(session.id, parsed.events)
         store_codex_thread_meta(agent_type, parsed.session_id, session.id)
@@ -334,37 +332,23 @@ defmodule CopilotLv.AgentDiscovery do
   end
 
   defp import_events(session_id, events) do
-    repo = CopilotLv.Repo
+    entries =
+      Enum.map(events, fn event ->
+        %{
+          type: event.type,
+          data: event.data || %{},
+          timestamp: event.timestamp,
+          sequence: event.sequence,
+          event_id: nil,
+          parent_event_id: nil
+        }
+      end)
 
-    events
-    |> Enum.chunk_every(500)
-    |> Enum.each(fn chunk ->
-      entries =
-        Enum.map(chunk, fn event ->
-          %{
-            id: Ash.UUIDv7.generate(),
-            event_type: event.type,
-            event_id: nil,
-            parent_event_id: nil,
-            data: Jason.encode!(event.data || %{}),
-            timestamp: event.timestamp,
-            sequence: event.sequence,
-            session_id: session_id
-          }
-        end)
-
-      repo.insert_all("events", entries,
-        log: false,
-        on_conflict: :nothing,
-        conflict_target: [:session_id, :sequence]
-      )
-    end)
+    SessionStoreImpl.insert_events(session_id, entries)
   end
 
   defp load_existing_sessions do
-    CopilotLv.Sessions.Session
-    |> Ash.Query.for_read(:list_all)
-    |> Ash.read!()
+    SessionStoreImpl.list_sessions([])
     |> Map.new(&{&1.id, &1})
   end
 
@@ -374,14 +358,17 @@ defmodule CopilotLv.AgentDiscovery do
         :ok
 
       raw ->
-        artifact =
-          CopilotLv.Agents.Codex.thread_meta_artifact(raw)
-          |> Map.put(:session_id, session_id)
+        art_map = CopilotLv.Agents.Codex.thread_meta_artifact(raw)
 
-        CopilotLv.Sessions.SessionArtifact
-        |> Ash.Changeset.for_create(:upsert, artifact)
-        |> Ash.create()
+        artifact = %JidoSessions.Artifact{
+          path: art_map.path,
+          artifact_type: art_map.artifact_type,
+          content: art_map.content,
+          content_hash: art_map.content_hash,
+          size: art_map.size
+        }
 
+        SessionStoreImpl.upsert_artifacts(session_id, [artifact])
         :ok
     end
   rescue
