@@ -11,8 +11,6 @@ defmodule Mix.Tasks.Copilot.Handoff do
 
   use Mix.Task
 
-  alias CopilotLv.SessionHandoff
-
   @shortdoc "Render a markdown session handoff"
 
   @impl Mix.Task
@@ -40,7 +38,7 @@ defmodule Mix.Tasks.Copilot.Handoff do
 
     Mix.Task.run("app.start")
 
-    case SessionHandoff.generate(session_ref, opts) do
+    case JidoSessions.Handoff.generate(CopilotLv.SessionStoreImpl, nil, session_ref, opts) do
       {:ok, %{markdown: markdown}} ->
         case Keyword.get(opts, :output) do
           nil -> IO.binwrite(markdown)

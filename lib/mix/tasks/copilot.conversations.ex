@@ -30,7 +30,6 @@ defmodule Mix.Tasks.Copilot.Conversations do
 
   use Mix.Task
 
-  alias CopilotLv.SessionHandoff.Extractor
   alias CopilotLv.Sessions.{Event, Session}
 
   require Ash.Query
@@ -101,7 +100,9 @@ defmodule Mix.Tasks.Copilot.Conversations do
 
   defp export_conversation(session, output_dir, dry_run, _verbose) do
     events = load_events(session)
-    extracted = Extractor.extract(session, events)
+    agent = session.agent || :copilot
+    turns = JidoSessions.parse_turns(events, agent)
+    extracted = JidoSessions.Handoff.Extractor.extract(turns)
 
     transcript = build_transcript(extracted)
 

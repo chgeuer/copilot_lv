@@ -1,7 +1,6 @@
 defmodule CopilotLv.SessionHandoffTest do
   use ExUnit.Case, async: false
 
-  alias CopilotLv.SessionHandoff
   alias CopilotLv.Sessions.Session
   alias CopilotLv.Test.SessionHandoffFixtures
 
@@ -9,10 +8,11 @@ defmodule CopilotLv.SessionHandoffTest do
     %{session: session} = SessionHandoffFixtures.create_copilot_handoff_session()
     on_exit(fn -> SessionHandoffFixtures.cleanup_session!(session.id) end)
 
-    {:ok, %{session: resolved_session, markdown: markdown}} = SessionHandoff.generate(session.id)
+    {:ok, %{session: resolved_session, markdown: markdown}} =
+      JidoSessions.Handoff.generate(CopilotLv.SessionStoreImpl, nil, session.id)
 
     assert resolved_session.id == session.id
-    assert markdown =~ "<!-- copilot-lv-session-handoff:v1 -->"
+    assert markdown =~ "<!-- jido-session-handoff:v1 -->"
     assert markdown =~ "# Session Handoff"
     assert markdown =~ "## Files Read"
     assert markdown =~ "Read `/tmp/copilot-lv/project/lib/example.ex:300-500`"
@@ -43,7 +43,8 @@ defmodule CopilotLv.SessionHandoffTest do
 
     provider_id = Session.provider_id(session.id)
 
-    {:ok, %{session: resolved_session}} = SessionHandoff.generate(provider_id, agent: :copilot)
+    {:ok, %{session: resolved_session}} =
+      JidoSessions.Handoff.generate(CopilotLv.SessionStoreImpl, nil, provider_id, agent: :copilot)
 
     assert resolved_session.id == session.id
   end

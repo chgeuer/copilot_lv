@@ -1,8 +1,6 @@
 defmodule CopilotLvWeb.SessionHandoffController do
   use CopilotLvWeb, :controller
 
-  alias CopilotLv.SessionHandoff
-
   def show(conn, %{"session_ref" => session_ref} = params) do
     opts = [
       agent: params["agent"],
@@ -12,7 +10,7 @@ defmodule CopilotLvWeb.SessionHandoffController do
       relative_to: params["relative_to"]
     ]
 
-    case SessionHandoff.generate(session_ref, opts) do
+    case JidoSessions.Handoff.generate(CopilotLv.SessionStoreImpl, nil, session_ref, opts) do
       {:ok, %{session: session, markdown: markdown}} ->
         conn
         |> put_resp_header("cache-control", "no-store")

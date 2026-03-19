@@ -3,7 +3,7 @@ defmodule CopilotLvWeb.SessionLive.Show do
 
   import CopilotLvWeb.FileTreePicker
 
-  alias CopilotLv.{SessionHandoff, SessionServer, SessionRegistry}
+  alias CopilotLv.{SessionServer, SessionRegistry}
   alias CopilotLv.Sessions.{Checkpoint, SessionArtifact}
   alias Jido.ToolRenderers.Adapters.CopilotLv, as: EventAdapter
   alias Jido.ToolRenderers.EventStream
@@ -2091,7 +2091,7 @@ defmodule CopilotLvWeb.SessionLive.Show do
   defp handoff_prompt(session_id) do
     session_id
     |> handoff_url()
-    |> SessionHandoff.takeover_prompt()
+    |> JidoSessions.Handoff.takeover_prompt()
   end
 
   defp endpoint_base_url do
