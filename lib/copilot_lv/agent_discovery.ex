@@ -478,7 +478,7 @@ defmodule CopilotLv.AgentDiscovery do
     # Extract cwd from the remote project directory name
     # e.g., /home/user/.claude/projects/-home-chgeuer-src-work/session.jsonl
     project_dir = remote_path |> Path.dirname() |> Path.basename()
-    remote_cwd = CopilotLv.Agents.Claude.decode_project_dir(project_dir)
+    remote_cwd = JidoSessions.AgentParsers.Claude.decode_project_dir(project_dir)
 
     # Also try extracting from event data
     event_cwd =

@@ -13,7 +13,7 @@ defmodule CopilotLv.Agents.Pi do
   `message`, `model_change`, `thinking_level_change`, and other entry types.
   """
 
-  @behaviour CopilotLv.Agents
+  @behaviour JidoSessions.AgentParser
 
   alias Jido.PI.SessionStore
   alias Jido.PI.SessionStore.{JSONL, PathEncoder}

@@ -12,7 +12,7 @@ defmodule CopilotLv.Agents.Codex do
 
   require Logger
 
-  @behaviour CopilotLv.Agents
+  @behaviour JidoSessions.AgentParser
 
   @codex_dir Path.expand("~/.codex")
 
