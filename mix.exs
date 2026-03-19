@@ -82,6 +82,7 @@ defmodule CopilotLv.MixProject do
       {:jido_ghcopilot, jido_dep("jido_ghcopilot")},
       {:jido_pi, jido_dep("jido_pi")},
       {:jido_tool_renderers, jido_dep("jido_tool_renderers")},
+      {:jido_sessions, jido_dep("jido_sessions")},
       {:jido_claude, github: "agentjido/jido_claude"},
       {:jido_codex, github: "agentjido/jido_codex"},
       {:jido_gemini, github: "agentjido/jido_gemini"},
