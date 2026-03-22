@@ -49,7 +49,7 @@ defmodule CopilotLvWeb.SessionLive.Show do
           end
 
         models =
-          Jido.GHCopilot.Models.all()
+          models_for_agent(db_session.agent || :copilot)
           |> Enum.sort_by(fn {name, _id, _multiplier} -> String.downcase(name) end)
 
         # Load historic events from DB
@@ -1904,6 +1904,37 @@ defmodule CopilotLvWeb.SessionLive.Show do
 
   defp dispatch_send_prompt(_agent, session_id, prompt, opts) do
     CopilotLv.SessionServer.send_prompt(session_id, prompt, opts)
+  end
+
+  @doc false
+  def models_for_agent(:claude) do
+    [
+      {"Claude Haiku 3.5", "haiku", 0.25},
+      {"Claude Sonnet 4", "sonnet", 1},
+      {"Claude Sonnet 4.5", "claude-sonnet-4-5-20250929", 1},
+      {"Claude Opus 4", "opus", 3}
+    ]
+  end
+
+  def models_for_agent(:codex) do
+    [
+      {"GPT-4.1", "gpt-4.1", 1},
+      {"GPT-4.1 mini", "gpt-4.1-mini", 0.33},
+      {"o3", "o3", 1},
+      {"o4-mini", "o4-mini", 0.33}
+    ]
+  end
+
+  def models_for_agent(:gemini) do
+    [
+      {"Gemini 2.5 Flash", "gemini-2.5-flash", 0.25},
+      {"Gemini 2.5 Pro", "gemini-2.5-pro", 1},
+      {"Gemini 3 Flash Preview", "gemini-3-flash-preview", 0.33}
+    ]
+  end
+
+  def models_for_agent(_copilot_or_other) do
+    Jido.GHCopilot.Models.all()
   end
 
   # Detect @query pattern in prompt text for file autocomplete

@@ -16,8 +16,7 @@ defmodule CopilotLvWeb.SessionLive.Index do
     end
 
     models =
-      Jido.GHCopilot.Models.all()
-      |> Enum.map(fn {name, id, multiplier} -> {name, id, multiplier} end)
+      CopilotLvWeb.SessionLive.Show.models_for_agent(:copilot)
       |> Enum.sort_by(fn {name, _id, _multiplier} -> String.downcase(name) end)
 
     active_sessions = load_active_sessions()
@@ -63,7 +62,12 @@ defmodule CopilotLvWeb.SessionLive.Index do
   @impl true
   def handle_event("select_agent", %{"agent" => agent_str}, socket) do
     agent = String.to_existing_atom(agent_str)
-    {:noreply, assign(socket, :selected_agent, agent)}
+
+    models =
+      CopilotLvWeb.SessionLive.Show.models_for_agent(agent)
+      |> Enum.sort_by(fn {name, _id, _multiplier} -> String.downcase(name) end)
+
+    {:noreply, socket |> assign(:selected_agent, agent) |> assign(:models, models)}
   end
 
   def handle_event("create_session", %{"session" => params}, socket) do
@@ -532,9 +536,6 @@ defmodule CopilotLvWeb.SessionLive.Index do
                     >
                       <span>{icon}</span>
                       <span>{label}</span>
-                      <%= unless agent == "copilot" do %>
-                        <span class="badge badge-xs badge-ghost opacity-60">CLI</span>
-                      <% end %>
                     </button>
                   <% end %>
                 </div>
@@ -549,7 +550,7 @@ defmodule CopilotLvWeb.SessionLive.Index do
                   open={@fs_picker_open}
                   expanded_dirs={@fs_expanded_dirs}
                 />
-                <%= if @selected_agent == :copilot do %>
+                <%= if @selected_agent != :pi do %>
                   <div class="form-control w-52">
                     <label class="label py-1"><span class="label-text text-xs">Model</span></label>
                     <select name="session[model]" class="select select-bordered select-sm w-full">
