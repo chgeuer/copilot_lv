@@ -1556,7 +1556,7 @@ defmodule CopilotLvWeb.SessionLive.Show do
     # Only user-initiated calls count as premium requests (same as Copilot CLI)
     premium_cost =
       assigns.usage
-      |> Enum.filter(&(&1.initiator == "user" && &1.cost != nil))
+      |> Enum.filter(&(Map.get(&1, :initiator) == "user" && Map.get(&1, :cost) != nil))
       |> Enum.map(& &1.cost)
       |> Enum.sum()
 
@@ -1571,10 +1571,10 @@ defmodule CopilotLvWeb.SessionLive.Show do
           model: model || "unknown",
           input_tokens: Enum.sum(Enum.map(entries, & &1.input_tokens)),
           output_tokens: Enum.sum(Enum.map(entries, & &1.output_tokens)),
-          cached: Enum.sum(Enum.map(entries, & &1.cache_read_tokens)),
+          cached: Enum.sum(Enum.map(entries, &(Map.get(&1, :cache_read_tokens, 0) || 0))),
           cost:
             entries
-            |> Enum.filter(&(&1.initiator == "user" && &1.cost != nil))
+            |> Enum.filter(&(Map.get(&1, :initiator) == "user" && Map.get(&1, :cost) != nil))
             |> Enum.map(& &1.cost)
             |> Enum.sum(),
           count: length(entries)
