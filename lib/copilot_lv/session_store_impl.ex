@@ -144,7 +144,9 @@ defmodule CopilotLv.SessionStoreImpl do
 
   @impl true
   def event_count(session_id) do
-    get_events(session_id) |> length()
+    import Ecto.Query, only: [from: 2]
+
+    Repo.one(from e in "events", where: e.session_id == ^session_id, select: count())
   end
 
   # ── Artifacts ──

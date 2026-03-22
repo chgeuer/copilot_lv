@@ -8,19 +8,30 @@ defmodule CopilotLv.SessionRegistry do
 
   alias CopilotLv.Sessions.Session
 
+  @harness_agents [:claude, :codex, :gemini]
+
   @doc "Start a new session. Returns `{:ok, id}` or `{:error, reason}`."
   def create_session(opts \\ []) do
-    # Generate a UUID and use it as both the copilot session ID and our prefixed primary key
-    copilot_uuid = generate_uuid()
-    id = Session.prefixed_id(:copilot, copilot_uuid)
+    agent = Keyword.get(opts, :agent, :copilot)
+    uuid = generate_uuid()
+    id = Session.prefixed_id(agent, uuid)
     opts = Keyword.put(opts, :id, id)
     cwd = Keyword.get(opts, :cwd, File.cwd!())
     model = Keyword.get(opts, :model)
 
     # Persist to DB
-    Ash.create!(Session, %{id: id, cwd: cwd, model: model})
+    Ash.create!(Session, %{id: id, cwd: cwd, model: model, agent: agent})
 
-    case DynamicSupervisor.start_child(__MODULE__.Supervisor, {CopilotLv.SessionServer, opts}) do
+    server_module =
+      if agent in @harness_agents do
+        CopilotLv.HarnessSessionServer
+      else
+        CopilotLv.SessionServer
+      end
+
+    child_opts = if agent in @harness_agents, do: Keyword.put(opts, :agent, agent), else: opts
+
+    case DynamicSupervisor.start_child(__MODULE__.Supervisor, {server_module, child_opts}) do
       {:ok, _pid} -> {:ok, id}
       {:error, reason} -> {:error, reason}
     end
@@ -143,6 +154,7 @@ defmodule CopilotLv.SessionRegistry do
   def resume_session(id) do
     case get_session(id) do
       {:ok, session} ->
+        agent = session.agent || :copilot
         # Update status in DB
         Ash.update!(session, %{status: :starting, stopped_at: nil}, action: :update_status)
 
@@ -152,7 +164,16 @@ defmodule CopilotLv.SessionRegistry do
           model: session.model
         ]
 
-        case DynamicSupervisor.start_child(__MODULE__.Supervisor, {CopilotLv.SessionServer, opts}) do
+        server_module =
+          if agent in @harness_agents do
+            CopilotLv.HarnessSessionServer
+          else
+            CopilotLv.SessionServer
+          end
+
+        child_opts = if agent in @harness_agents, do: Keyword.put(opts, :agent, agent), else: opts
+
+        case DynamicSupervisor.start_child(__MODULE__.Supervisor, {server_module, child_opts}) do
           {:ok, _pid} -> {:ok, id}
           {:error, reason} -> {:error, reason}
         end

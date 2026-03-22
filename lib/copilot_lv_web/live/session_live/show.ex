@@ -197,7 +197,7 @@ defmodule CopilotLvWeb.SessionLive.Show do
         |> assign(:pasted_contents, [])
         |> stream_insert(:events, user_event, at: -1)
 
-      SessionServer.send_prompt(socket.assigns.session_id, full_prompt, send_opts)
+      dispatch_send_prompt(socket.assigns.agent, socket.assigns.session_id, full_prompt, send_opts)
       {:noreply, push_event(socket, "scroll-bottom", %{})}
     end
   end
@@ -1895,6 +1895,16 @@ defmodule CopilotLvWeb.SessionLive.Show do
 
   defp map_get(%{__struct__: _} = struct, key), do: Map.get(struct, key)
   defp map_get(map, key) when is_map(map), do: Map.get(map, key)
+
+  @harness_agents [:claude, :codex, :gemini]
+
+  defp dispatch_send_prompt(agent, session_id, prompt, opts) when agent in @harness_agents do
+    CopilotLv.HarnessSessionServer.send_prompt(session_id, prompt, opts)
+  end
+
+  defp dispatch_send_prompt(_agent, session_id, prompt, opts) do
+    CopilotLv.SessionServer.send_prompt(session_id, prompt, opts)
+  end
 
   # Detect @query pattern in prompt text for file autocomplete
   defp detect_at_mention(prompt, socket) do

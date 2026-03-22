@@ -69,32 +69,24 @@ defmodule CopilotLvWeb.SessionLive.Index do
   def handle_event("create_session", %{"session" => params}, socket) do
     cwd = params["cwd"] |> String.trim()
     agent = params["agent"] || "copilot"
+    agent_atom = String.to_existing_atom(agent)
     model = params["model"]
     model = if model == "", do: nil, else: model
 
     if File.dir?(cwd) do
-      if agent != "copilot" do
-        {:noreply,
-         put_flash(
-           socket,
-           :info,
-           "Live #{agent} sessions coming soon. Use the CLI: #{agent_cli_hint(agent, cwd)}"
-         )}
-      else
-        socket = assign(socket, :creating, true)
+      socket = assign(socket, :creating, true)
 
-        case SessionRegistry.create_session(cwd: cwd, model: model) do
-          {:ok, id} ->
-            {:noreply, push_navigate(socket, to: ~p"/session/#{id}")}
+      case SessionRegistry.create_session(cwd: cwd, model: model, agent: agent_atom) do
+        {:ok, id} ->
+          {:noreply, push_navigate(socket, to: ~p"/session/#{id}")}
 
-          {:error, reason} ->
-            socket =
-              socket
-              |> assign(:creating, false)
-              |> put_flash(:error, "Failed to create session: #{inspect(reason)}")
+        {:error, reason} ->
+          socket =
+            socket
+            |> assign(:creating, false)
+            |> put_flash(:error, "Failed to create session: #{inspect(reason)}")
 
-            {:noreply, socket}
-        end
+          {:noreply, socket}
       end
     else
       {:noreply, put_flash(socket, :error, "Directory does not exist: #{cwd}")}
