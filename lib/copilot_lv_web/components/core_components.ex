@@ -445,6 +445,19 @@ defmodule CopilotLvWeb.CoreComponents do
     """
   end
 
+  @doc """
+  Renders markdown content with a built-in copy button.
+
+  Delegates to `Jido.ToolRenderers.Components.markdown_content/1`.
+  See that module for full documentation.
+
+  ## Examples
+
+      <.markdown_content id="my-md" content={@some_markdown} />
+      <.markdown_content id="my-md" content={@text} class="text-xs" copy={false} />
+  """
+  defdelegate markdown_content(assigns), to: Jido.ToolRenderers.Components
+
   ## JS Commands
 
   def show(js \\ %JS{}, selector) do

@@ -597,12 +597,12 @@ defmodule CopilotLvWeb.SessionLive.Show do
 
   defp apply_accumulator_actions(socket, actions) do
     Enum.reduce(actions, socket, fn
-      {:stream_insert, event_map} ->
+      {:stream_insert, event_map}, socket ->
         socket
         |> track_terminal_event(event_map)
         |> stream_insert(:events, event_map, at: -1)
 
-      {:push_event, name, payload} ->
+      {:push_event, name, payload}, socket ->
         push_event(socket, name, payload)
     end)
   end
@@ -1366,10 +1366,18 @@ defmodule CopilotLvWeb.SessionLive.Show do
 
         <div class="flex-1 space-y-2 overflow-y-auto px-4 py-4">
           <h4 class="text-sm font-semibold text-base-content">Stored content</h4>
-          <pre
-            id="artifact-content"
-            class="overflow-x-auto rounded-2xl border border-base-300 bg-base-200/60 p-4 text-xs leading-relaxed text-base-content whitespace-pre-wrap"
-          ><%= @artifact.content %></pre>
+          <%= if String.ends_with?(@artifact.path || "", ".md") do %>
+            <.markdown_content
+              id="artifact-content"
+              content={@artifact.content}
+              class="rounded-2xl border border-base-300 bg-base-200/60 p-4 text-sm text-base-content"
+            />
+          <% else %>
+            <pre
+              id="artifact-content"
+              class="overflow-x-auto rounded-2xl border border-base-300 bg-base-200/60 p-4 text-xs leading-relaxed text-base-content whitespace-pre-wrap"
+            ><%= @artifact.content %></pre>
+          <% end %>
         </div>
       </div>
     <% else %>
@@ -1644,13 +1652,11 @@ defmodule CopilotLvWeb.SessionLive.Show do
 
         <%!-- Question --%>
         <div class="px-6 pb-4">
-          <div
-            class="text-base text-base-content leading-relaxed"
+          <.markdown_content
             id="ask-user-question"
-            phx-hook="MarkdownContent"
-            data-markdown={@request.question}
-          >
-          </div>
+            content={@request.question}
+            class="text-base text-base-content leading-relaxed"
+          />
         </div>
 
         <%!-- Choices --%>
