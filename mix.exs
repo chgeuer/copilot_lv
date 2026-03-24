@@ -53,11 +53,14 @@ defmodule CopilotLv.MixProject do
     end
   end
 
-  defp agentjido_dep(name) do
+  defp agentjido_dep(name, opts \\ []) do
     if System.get_env("USER") == "chgeuer" do
       [path: "/home/chgeuer/github/agentjido/#{name}"]
     else
-      [github: "agentjido/#{name}"]
+      case Keyword.get(opts, :branch) do
+        nil -> [github: "chgeuer/#{name}"]
+        branch -> [github: "chgeuer/#{name}", branch: branch]
+      end
     end
   end
 
@@ -91,17 +94,17 @@ defmodule CopilotLv.MixProject do
       {:jido_pi, jido_dep("jido_pi")},
       {:jido_tool_renderers, jido_dep("jido_tool_renderers")},
       {:jido_sessions, jido_dep("jido_sessions")},
-      {:jido_claude, agentjido_dep("jido_claude")},
-      {:jido_codex, agentjido_dep("jido_codex")},
-      {:jido_gemini, agentjido_dep("jido_gemini")},
+      {:jido_claude, agentjido_dep("jido_claude", branch: "feat/thinking-and-cache-usage")},
+      {:jido_codex, agentjido_dep("jido_codex", branch: "feat/usage-enrichment")},
+      {:jido_gemini, agentjido_dep("jido_gemini", branch: "feat/usage-enrichment")},
       # Overrides for transitive deps not yet on hex or needing version alignment
       {:jido, "~> 2.1", override: true},
       {:jido_action, "~> 2.1", override: true},
       {:jido_signal, "~> 2.0", override: true},
       {:libgraph, "~> 0.16.1-mg.1", hex: :multigraph, override: true},
       {:jido_shell, agentjido_dep("jido_shell") ++ [override: true]},
-      {:jido_harness, agentjido_dep("jido_harness") ++ [override: true]},
-      {:jido_vfs, agentjido_dep("jido_vfs") ++ [override: true]},
+      {:jido_harness, agentjido_dep("jido_harness", branch: "fix/update-sprite-lifecycle-alias") ++ [override: true]},
+      {:jido_vfs, agentjido_dep("jido_vfs", branch: "fix/pin-chunk-size-in-bitstring-match") ++ [override: true]},
       {:sprites, github: "mikehostetler/sprites-ex", override: true},
       {:ash, "~> 3.16"},
       {:ash_sqlite, "~> 0.2.15"},
