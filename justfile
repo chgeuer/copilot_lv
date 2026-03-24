@@ -3,14 +3,16 @@ start:
     #!/usr/bin/env bash
     SNAME="$(basename "$(pwd)")"
     export PORT="${PORT:-$(phx-port)}"
-    exec elixir --sname "$SNAME" --cookie devcookie -S mix phx.server 2>&1 | tee run.log
+    export ELIXIR_ERL_OPTIONS="-sname $SNAME -setcookie devcookie"
+    exec mix phx.server 2>&1 | tee run.log
 
 # Start the Phoenix server in background (logs to run.log only)
 start-bg:
     #!/usr/bin/env bash
     SNAME="$(basename "$(pwd)")"
     export PORT="${PORT:-$(phx-port)}"
-    exec elixir --sname "$SNAME" --cookie devcookie -S mix phx.server > run.log 2>&1
+    export ELIXIR_ERL_OPTIONS="-sname $SNAME -setcookie devcookie"
+    exec mix phx.server > run.log 2>&1
 
 # Open the app in a browser (starts the server if not running)
 open:
@@ -19,7 +21,8 @@ open:
     if ! scripts/dev_node.sh status > /dev/null 2>&1; then
         echo "Node $SNAME not running, starting in background..."
         export PORT="${PORT:-$(phx-port)}"
-        elixir --sname "$SNAME" --cookie devcookie -S mix phx.server > run.log 2>&1 &
+        export ELIXIR_ERL_OPTIONS="-sname $SNAME -setcookie devcookie"
+        mix phx.server > run.log 2>&1 &
         scripts/dev_node.sh await
     fi
     phx-port open
