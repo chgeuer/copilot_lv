@@ -93,7 +93,9 @@ defmodule CopilotLvWeb.SessionLive.Show do
           |> sort_artifacts()
 
         # Pre-process events to accumulate assistant messages for markdown rendering
-        stream_events = EventStream.build_events(db_events, db_session.agent || :copilot)
+        # Harness-managed agents store events in copilot-native format, so use :copilot parser
+        event_format = if (db_session.agent || :copilot) in [:claude, :codex, :gemini], do: :copilot, else: db_session.agent || :copilot
+        stream_events = EventStream.build_events(db_events, event_format)
 
         socket =
           socket
@@ -195,6 +197,7 @@ defmodule CopilotLvWeb.SessionLive.Show do
         |> assign(:file_suggestions, [])
         |> assign(:file_query, "")
         |> assign(:pasted_contents, [])
+        |> assign(:accumulator, Accumulator.new())
         |> stream_insert(:events, user_event, at: -1)
 
       dispatch_send_prompt(socket.assigns.agent, socket.assigns.session_id, full_prompt, send_opts)

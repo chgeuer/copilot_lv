@@ -102,17 +102,6 @@ defmodule CopilotLv.HarnessSessionServer do
     persist_event(state, user_event)
     broadcast(state, {:session_event, user_event})
 
-    # Emit a synthetic turn_start so the Accumulator resets for the new turn
-    turn_start_event = %{
-      id: "turn-#{System.unique_integer([:positive])}",
-      type: "assistant.turn_start",
-      data: %{},
-      timestamp: DateTime.utc_now() |> DateTime.to_iso8601()
-    }
-
-    persist_event(state, turn_start_event)
-    broadcast(state, {:session_event, turn_start_event})
-
     # Build RunRequest for the adapter
     metadata_key = to_string(state.agent)
 
@@ -210,6 +199,7 @@ defmodule CopilotLv.HarnessSessionServer do
             cache_read_tokens: data["cacheReadTokens"] || 0,
             cache_write_tokens: data["cacheWriteTokens"] || 0,
             cost: data["cost"],
+            initiator: data["initiator"],
             duration_ms: data["duration"]
           }
 
