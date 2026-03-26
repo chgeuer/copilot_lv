@@ -391,6 +391,9 @@ defmodule CopilotLv.AgentDiscovery do
 
         :gemini ->
           "find #{dir}/ -path '*/chats/session-*.json' 2>/dev/null | head -500"
+
+        :pi ->
+          "find #{dir}/ -maxdepth 2 -name '*.jsonl' 2>/dev/null | head -500"
       end
 
     case System.cmd("ssh", [hostname, cmd], stderr_to_stdout: true) do
@@ -435,6 +438,15 @@ defmodule CopilotLv.AgentDiscovery do
     case Regex.run(~r/session-[\d\-T]+-([0-9a-f]+)$/, basename) do
       [_, short_id] -> short_id
       _ -> basename
+    end
+  end
+
+  defp extract_remote_session_id(path, :pi) do
+    basename = Path.basename(path, ".jsonl")
+
+    case String.split(basename, "_", parts: 2) do
+      [_timestamp, uuid] -> uuid
+      [single] -> single
     end
   end
 
