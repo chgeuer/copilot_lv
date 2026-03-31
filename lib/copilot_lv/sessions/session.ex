@@ -130,7 +130,11 @@ defmodule CopilotLv.Sessions.Session do
         :branch,
         :git_root,
         :model,
-        :stopped_at
+        :stopped_at,
+        :status,
+        :started_at,
+        :source,
+        :copilot_version
       ])
     end
 
