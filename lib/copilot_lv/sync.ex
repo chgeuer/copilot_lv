@@ -163,12 +163,13 @@ defmodule CopilotLv.Sync do
   defp sync_session(session_id, dir_path, existing_ids, live_ids, _verbose, dry_run) do
     workspace = read_workspace(dir_path)
     events_path = Path.join(dir_path, "events.jsonl")
+    has_events = File.exists?(events_path)
 
     cond do
       MapSet.member?(live_ids, session_id) ->
         :skipped
 
-      !File.exists?(events_path) ->
+      !has_events && workspace == %{} ->
         :skipped
 
       MapSet.member?(existing_ids, session_id) ->
@@ -183,13 +184,15 @@ defmodule CopilotLv.Sync do
 
   defp import_new_session(session_id, dir_path, workspace, dry_run) do
     events_path = Path.join(dir_path, "events.jsonl")
-    raw_events = read_events(events_path)
 
-    if Enum.empty?(raw_events) do
+    raw_events =
+      if File.exists?(events_path), do: read_events(events_path), else: []
+
+    if Enum.empty?(raw_events) && workspace == %{} do
       :skipped
     else
       session_start = List.first(raw_events)
-      context = get_in(session_start, ["data", "context"]) || %{}
+      context = if session_start, do: get_in(session_start, ["data", "context"]) || %{}, else: %{}
       summary = workspace["summary"]
 
       title =
@@ -216,19 +219,21 @@ defmodule CopilotLv.Sync do
           source: :imported,
           status: :stopped,
           cwd: workspace["cwd"] || context["cwd"] || "unknown",
-          model: get_in(session_start, ["data", "selectedModel"]),
+          model: if(session_start, do: get_in(session_start, ["data", "selectedModel"])),
           summary: summary,
           title: title,
           git_root: workspace["git_root"] || context["gitRoot"],
           branch: workspace["branch"] || context["branch"],
-          agent_version: get_in(session_start, ["data", "copilotVersion"]),
-          started_at: parse_timestamp(workspace["created_at"] || session_start["timestamp"]),
+          agent_version: if(session_start, do: get_in(session_start, ["data", "copilotVersion"])),
+          started_at: parse_timestamp(workspace["created_at"] || (session_start && session_start["timestamp"])),
           stopped_at: parse_timestamp(workspace["updated_at"])
         }
 
         {:ok, _} = SessionStoreImpl.upsert_session(jido_session)
 
-        event_count = import_events(prefixed_id, raw_events)
+        event_count =
+          if raw_events != [], do: import_events(prefixed_id, raw_events), else: 0
+
         checkpoints = read_checkpoints(dir_path)
         cp_count = import_checkpoints(prefixed_id, checkpoints)
         artifacts = read_artifacts(dir_path)
@@ -242,7 +247,10 @@ defmodule CopilotLv.Sync do
 
   defp sync_existing_session(session_id, dir_path, workspace, dry_run) do
     events_path = Path.join(dir_path, "events.jsonl")
-    raw_events = read_events(events_path)
+
+    raw_events =
+      if File.exists?(events_path), do: read_events(events_path), else: []
+
     prefixed_id = CopilotLv.Sessions.Session.prefixed_id(:copilot, session_id)
 
     case SessionStoreImpl.get_session(prefixed_id) do
