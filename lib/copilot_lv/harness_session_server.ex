@@ -306,7 +306,8 @@ defmodule CopilotLv.HarnessSessionServer do
         {"assistant.usage", %{
           "inputTokens" => payload["input_tokens"],
           "outputTokens" => payload["output_tokens"],
-          "cacheReadTokens" => payload["cached_input_tokens"],
+          "cacheReadTokens" => payload["cache_read_input_tokens"] || payload["cached_input_tokens"],
+          "cacheWriteTokens" => payload["cache_creation_input_tokens"],
           "model" => payload["model"],
           "cost" => payload["cost_usd"],
           "duration" => payload["duration_ms"]
@@ -324,9 +325,42 @@ defmodule CopilotLv.HarnessSessionServer do
       :file_change ->
         {"file.change", payload}
 
+      :provider_event ->
+        translate_provider_event(payload)
+
       other ->
         {to_string(other), payload}
     end
+  end
+
+  defp translate_provider_event(%{"source" => "message_start"} = payload) do
+    {"assistant.message_usage", %{
+      "inputTokens" => payload["input_tokens"],
+      "cacheReadTokens" => payload["cache_read_input_tokens"],
+      "cacheWriteTokens" => payload["cache_creation_input_tokens"],
+      "model" => payload["model"],
+      "source" => "message_start"
+    }}
+  end
+
+  defp translate_provider_event(%{"source" => "message_delta"} = payload) do
+    {"assistant.message_usage", %{
+      "outputTokens" => payload["output_tokens"],
+      "stopReason" => payload["stop_reason"],
+      "source" => "message_delta"
+    }}
+  end
+
+  defp translate_provider_event(%{"source" => "stream_error"} = payload) do
+    {"session.error", %{
+      "message" => payload["message"],
+      "errorType" => payload["error_type"],
+      "source" => "stream_error"
+    }}
+  end
+
+  defp translate_provider_event(payload) do
+    {"provider_event", payload}
   end
 
   # ── Per-agent run options ──
