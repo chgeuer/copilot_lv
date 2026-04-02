@@ -123,6 +123,8 @@ defmodule CopilotLv.SessionStoreImpl do
         acc + inserted
       end)
 
+    if count > 0, do: refresh_event_count(session_id)
+
     {:ok, count}
   end
 
@@ -147,6 +149,21 @@ defmodule CopilotLv.SessionStoreImpl do
     import Ecto.Query, only: [from: 2]
 
     Repo.one(from e in "events", where: e.session_id == ^session_id, select: count())
+  end
+
+  @doc "Updates the session's event_count field from the actual events table count."
+  def refresh_event_count(session_id) do
+    actual = event_count(session_id)
+
+    case Ash.get(Session, session_id) do
+      {:ok, session} ->
+        session
+        |> Ash.Changeset.for_update(:update_import, %{event_count: actual})
+        |> Ash.update()
+
+      _ ->
+        :ok
+    end
   end
 
   # ── Artifacts ──
@@ -325,7 +342,6 @@ defmodule CopilotLv.SessionStoreImpl do
       started_at: s.started_at,
       stopped_at: s.stopped_at,
       imported_at: DateTime.utc_now(),
-      event_count: 0,
       agent: s.agent,
       hostname: s.hostname
     }
