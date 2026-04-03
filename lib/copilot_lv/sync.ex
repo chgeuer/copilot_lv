@@ -854,7 +854,8 @@ defmodule CopilotLv.Sync do
     {:ok, stats}
   end
 
-  defp repair_session_event_ids(repo, session_id, events_path) do
+  @doc false
+  def repair_session_event_ids(repo, session_id, events_path) do
     # Read the raw events from disk to extract id/parentId
     id_map =
       events_path
