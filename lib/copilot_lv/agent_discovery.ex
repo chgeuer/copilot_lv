@@ -185,7 +185,7 @@ defmodule CopilotLv.AgentDiscovery do
           if verbose, do: Logger.info("Would import #{agent_type}/#{session_id}")
           %{stats | imported: stats.imported + 1}
         else
-          case do_import(parsed, agent_type, hostname, config_dir) do
+          case do_import(parsed, agent_type, hostname, config_dir, path) do
             {:ok, _} ->
               if verbose, do: Logger.info("Imported #{agent_type}/#{session_id}")
               %{stats | imported: stats.imported + 1}
@@ -240,7 +240,7 @@ defmodule CopilotLv.AgentDiscovery do
 
             %{stats | repaired: stats.repaired + 1}
           else
-            repair_session(existing_session, parsed, agent_type, config_dir, hostname)
+            repair_session(existing_session, parsed, agent_type, config_dir, hostname, path)
 
             if verbose do
               reason =
@@ -275,7 +275,8 @@ defmodule CopilotLv.AgentDiscovery do
          parsed,
          agent_type,
          _config_dir,
-         hostname
+         hostname,
+         source_path \\ nil
        ) do
     # Incremental event append (on_conflict: :nothing handles idempotency)
     import_events(existing_session.id, parsed.events)
@@ -284,10 +285,14 @@ defmodule CopilotLv.AgentDiscovery do
     provider_id = CopilotLv.Sessions.Session.provider_id(existing_session.id)
     store_codex_thread_meta(agent_type, provider_id, existing_session.id)
 
+    # Import files from agent session directory (tool-results, etc.)
+    import_agent_artifacts(agent_type, existing_session.id, source_path)
+
     # Update session metadata via SessionStoreImpl
     updated_session = %JidoSessions.Session{
       existing_session
       | agent: agent_type,
+        status: :stopped,
         summary: parsed.summary || existing_session.summary,
         title: parsed.title || existing_session.title,
         git_root: parsed.git_root || existing_session.git_root,
@@ -300,7 +305,7 @@ defmodule CopilotLv.AgentDiscovery do
     SessionStoreImpl.upsert_session(updated_session)
   end
 
-  defp do_import(parsed, agent_type, hostname, _config_dir) do
+  defp do_import(parsed, agent_type, hostname, _config_dir, source_path \\ nil) do
     id = CopilotLv.Sessions.Session.prefixed_id(agent_type, parsed.session_id)
 
     jido_session = %JidoSessions.Session{
@@ -324,6 +329,7 @@ defmodule CopilotLv.AgentDiscovery do
       {:ok, session} ->
         import_events(session.id, parsed.events)
         store_codex_thread_meta(agent_type, parsed.session_id, session.id)
+        import_agent_artifacts(agent_type, session.id, source_path)
         {:ok, session}
 
       {:error, reason} ->
@@ -334,13 +340,15 @@ defmodule CopilotLv.AgentDiscovery do
   defp import_events(session_id, events) do
     entries =
       Enum.map(events, fn event ->
+        data = event.data || %{}
+
         %{
           type: event.type,
-          data: event.data || %{},
+          data: data,
           timestamp: event.timestamp,
           sequence: event.sequence,
-          event_id: nil,
-          parent_event_id: nil
+          event_id: data["id"],
+          parent_event_id: data["parentId"]
         }
       end)
 
@@ -376,6 +384,31 @@ defmodule CopilotLv.AgentDiscovery do
   end
 
   defp store_codex_thread_meta(_agent_type, _provider_id, _session_id), do: :ok
+
+  defp import_agent_artifacts(_agent_type, _session_id, nil), do: :ok
+
+  defp import_agent_artifacts(agent_type, session_id, source_path) do
+    artifacts = CopilotLv.Sync.read_artifacts_for_agent(agent_type, source_path)
+
+    unless Enum.empty?(artifacts) do
+      art_structs =
+        Enum.map(artifacts, fn art ->
+          %JidoSessions.Artifact{
+            path: art.path,
+            artifact_type: art.artifact_type,
+            content: art.content,
+            content_hash: art.content_hash,
+            size: art.size
+          }
+        end)
+
+      SessionStoreImpl.upsert_artifacts(session_id, art_structs)
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  end
 
   defp ssh_list_files(hostname, dir, agent_type) do
     cmd =
