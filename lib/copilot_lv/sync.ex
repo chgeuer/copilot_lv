@@ -794,6 +794,118 @@ defmodule CopilotLv.Sync do
 
   defp parse_timestamp(_), do: nil
 
+  # ── Event ID Repair ──
+
+  @doc """
+  Repair events missing event_id/parent_event_id by re-reading from events.jsonl on disk.
+
+  Only repairs local sessions where the source file exists. Remote-imported sessions
+  without local files are skipped (they can be repaired by re-importing from the remote host).
+
+  Returns `{:ok, %{repaired: N, skipped: N}}`.
+  """
+  def repair_event_ids(opts \\ []) do
+    verbose = Keyword.get(opts, :verbose, false)
+    repo = CopilotLv.Repo
+
+    import Ecto.Query, only: [from: 2]
+
+    # Find sessions with nil event_ids
+    session_ids =
+      repo.all(
+        from e in "events",
+          join: s in "sessions",
+          on: e.session_id == s.id,
+          where: s.agent == "copilot" and is_nil(e.event_id),
+          group_by: e.session_id,
+          select: e.session_id
+      )
+
+    stats = %{repaired_sessions: 0, repaired_events: 0, skipped: 0}
+
+    stats =
+      Enum.reduce(session_ids, stats, fn prefixed_id, stats ->
+        provider_id = CopilotLv.Sessions.Session.provider_id(prefixed_id)
+
+        events_path =
+          Enum.find_value(@session_state_dirs, fn dir ->
+            path = Path.join([dir, provider_id, "events.jsonl"])
+            if File.exists?(path), do: path
+          end)
+
+        if events_path do
+          count = repair_session_event_ids(repo, prefixed_id, events_path)
+
+          if verbose and count > 0 do
+            require Logger
+            Logger.info("Repaired #{count} event IDs for #{prefixed_id}")
+          end
+
+          %{
+            stats
+            | repaired_sessions: stats.repaired_sessions + (if count > 0, do: 1, else: 0),
+              repaired_events: stats.repaired_events + count
+          }
+        else
+          %{stats | skipped: stats.skipped + 1}
+        end
+      end)
+
+    {:ok, stats}
+  end
+
+  defp repair_session_event_ids(repo, session_id, events_path) do
+    # Read the raw events from disk to extract id/parentId
+    id_map =
+      events_path
+      |> File.stream!()
+      |> Stream.with_index(1)
+      |> Stream.map(fn {line, seq} ->
+        case Jason.decode(String.trim(line)) do
+          {:ok, event} -> {seq, event["id"], event["parentId"]}
+          _ -> nil
+        end
+      end)
+      |> Stream.reject(&is_nil/1)
+      |> Stream.filter(fn {_seq, id, _pid} -> not is_nil(id) end)
+      |> Enum.to_list()
+
+    # Bulk update using CASE expressions per chunk
+    id_map
+    |> Enum.chunk_every(500)
+    |> Enum.reduce(0, fn chunk, acc ->
+      seqs = Enum.map(chunk, &elem(&1, 0))
+      placeholders = Enum.map_join(1..length(seqs), ", ", fn i -> "?#{i}" end)
+
+      id_cases =
+        chunk
+        |> Enum.map_join(" ", fn {seq, eid, _pid} ->
+          "WHEN #{seq} THEN '#{String.replace(eid, "'", "''")}'"
+        end)
+
+      pid_cases =
+        chunk
+        |> Enum.map_join(" ", fn {seq, _eid, pid} ->
+          if pid,
+            do: "WHEN #{seq} THEN '#{String.replace(pid, "'", "''")}'"  ,
+            else: "WHEN #{seq} THEN NULL"
+        end)
+
+      sql = """
+      UPDATE events
+      SET event_id = CASE sequence #{id_cases} END,
+          parent_event_id = CASE sequence #{pid_cases} END
+      WHERE session_id = ?#{length(seqs) + 1}
+        AND sequence IN (#{placeholders})
+        AND event_id IS NULL
+      """
+
+      params = seqs ++ [session_id]
+      result = repo.query!(sql, params, log: false)
+      acc + result.num_rows
+    end)
+  end
+
   # ── Session Store DB Import ──
 
   @session_store_db_paths [
