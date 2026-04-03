@@ -86,6 +86,20 @@ defmodule CopilotLv.Sync do
 
       {:ok, stats}
     end
+    |> then(fn
+      {:ok, stats} ->
+        # Also import from session-store.db (only additive, never deletes)
+        ss_stats =
+          case import_session_store_db(opts) do
+            {:ok, ss} -> ss
+            _ -> %{}
+          end
+
+        {:ok, Map.put(stats, :session_store_db, ss_stats)}
+
+      error ->
+        error
+    end)
   end
 
   # ── Session Directory Scanning ──
@@ -225,7 +239,10 @@ defmodule CopilotLv.Sync do
           git_root: workspace["git_root"] || context["gitRoot"],
           branch: workspace["branch"] || context["branch"],
           agent_version: if(session_start, do: get_in(session_start, ["data", "copilotVersion"])),
-          started_at: parse_timestamp(workspace["created_at"] || (session_start && session_start["timestamp"])),
+          started_at:
+            parse_timestamp(
+              workspace["created_at"] || (session_start && session_start["timestamp"])
+            ),
           stopped_at: parse_timestamp(workspace["updated_at"])
         }
 
@@ -292,8 +309,14 @@ defmodule CopilotLv.Sync do
           art_count = import_artifacts(prefixed_id, artifacts)
           todo_count = import_session_todos(prefixed_id, todos)
 
-          # Update session metadata
-          updated_session = %JidoSessions.Session{existing | summary: summary, title: title}
+          # Update session metadata (always mark imported sessions as stopped)
+          updated_session = %JidoSessions.Session{
+            existing
+            | summary: summary,
+              title: title,
+              status: :stopped
+          }
+
           SessionStoreImpl.upsert_session(updated_session)
 
           has_changes = event_count > 0 || art_count > 0 || todo_count > 0
@@ -372,7 +395,70 @@ defmodule CopilotLv.Sync do
     end
   end
 
-  defp read_artifacts(dir_path) do
+  @doc """
+  Reads artifact files from an agent session directory associated with a JSONL path.
+
+  For Claude sessions, the JSONL is at `<project>/<uuid>.jsonl` and sibling directories
+  like `<project>/<uuid>/tool-results/` may contain large output files.
+  For Copilot sessions, the directory is the session state dir itself.
+  """
+  def read_artifacts_for_agent(:claude, jsonl_path) when is_binary(jsonl_path) do
+    session_id = jsonl_path |> Path.basename() |> String.trim_trailing(".jsonl")
+    session_dir = Path.join(Path.dirname(jsonl_path), session_id)
+
+    if File.dir?(session_dir) do
+      read_agent_session_dir(session_dir)
+    else
+      []
+    end
+  end
+
+  def read_artifacts_for_agent(:copilot, dir_path) when is_binary(dir_path) do
+    if File.dir?(dir_path) do
+      read_artifacts(dir_path)
+    else
+      []
+    end
+  end
+
+  def read_artifacts_for_agent(_agent, _path), do: []
+
+  # Read files from an agent's session subdirectory (tool-results, files, etc.)
+  defp read_agent_session_dir(session_dir) do
+    artifacts = []
+
+    # tool-results/* directory
+    tool_results_dir = Path.join(session_dir, "tool-results")
+
+    artifacts =
+      if File.dir?(tool_results_dir) do
+        read_files_from_dir(tool_results_dir, "tool-results") ++ artifacts
+      else
+        artifacts
+      end
+
+    # files/* directory (used by copilot/harness for pasted content)
+    files_dir = Path.join(session_dir, "files")
+
+    artifacts =
+      if File.dir?(files_dir) do
+        read_files_from_dir(files_dir, "files") ++ artifacts
+      else
+        artifacts
+      end
+
+    # Any other subdirectories with files can be added here
+
+    artifacts
+  end
+
+  @doc """
+  Reads artifact files from a session directory.
+
+  Scans for plan.md, workspace.yaml, files/*, tool-results/*, and session.db.
+  Returns a list of artifact maps with :path, :content, :content_hash, :size, :artifact_type.
+  """
+  def read_artifacts(dir_path) do
     artifacts = []
 
     # plan.md
@@ -397,21 +483,22 @@ defmodule CopilotLv.Sync do
         artifacts
       end
 
-    # files/* directory
+    # files/* directory (copilot sessions)
     files_dir = Path.join(dir_path, "files")
 
     artifacts =
       if File.dir?(files_dir) do
-        file_artifacts =
-          files_dir
-          |> File.ls!()
-          |> Enum.filter(&(!File.dir?(Path.join(files_dir, &1))))
-          |> Enum.map(fn filename ->
-            content = File.read!(Path.join(files_dir, filename))
-            make_artifact("files/#{filename}", content, :file)
-          end)
+        read_files_from_dir(files_dir, "files") ++ artifacts
+      else
+        artifacts
+      end
 
-        file_artifacts ++ artifacts
+    # tool-results/* directory (Claude sessions via harness)
+    tool_results_dir = Path.join(dir_path, "tool-results")
+
+    artifacts =
+      if File.dir?(tool_results_dir) do
+        read_files_from_dir(tool_results_dir, "tool-results") ++ artifacts
       else
         artifacts
       end
@@ -430,6 +517,18 @@ defmodule CopilotLv.Sync do
       end
 
     artifacts
+  end
+
+  defp read_files_from_dir(dir, prefix) do
+    dir
+    |> File.ls!()
+    |> Enum.filter(&(!File.dir?(Path.join(dir, &1))))
+    |> Enum.map(fn filename ->
+      content = File.read!(Path.join(dir, filename))
+      make_artifact("#{prefix}/#{filename}", content, :file)
+    end)
+  rescue
+    _ -> []
   end
 
   defp make_artifact(path, content, type) do
@@ -636,7 +735,8 @@ defmodule CopilotLv.Sync do
     length(checkpoints)
   end
 
-  defp import_artifacts(session_id, artifacts) do
+  @doc "Imports a list of artifact maps into the DB for the given session."
+  def import_artifacts(session_id, artifacts) do
     unless Enum.empty?(artifacts) do
       art_structs =
         Enum.map(artifacts, fn art ->
@@ -693,4 +793,357 @@ defmodule CopilotLv.Sync do
   end
 
   defp parse_timestamp(_), do: nil
+
+  # ── Session Store DB Import ──
+
+  @session_store_db_paths [
+    Path.join(System.user_home!(), ".copilot/session-store.db")
+  ]
+
+  @doc """
+  Import data from the Copilot CLI's centralized session-store.db.
+
+  This database contains turns (conversations), structured checkpoints,
+  session files (which files were touched), and session refs (git commits/PRs).
+
+  Only additive — never deletes existing data. Merges with existing sessions
+  when they overlap with events.jsonl-imported data.
+  """
+  def import_session_store_db(opts \\ []) do
+    verbose = Keyword.get(opts, :verbose, false)
+
+    stats = %{
+      sessions_created: 0,
+      sessions_updated: 0,
+      turns_imported: 0,
+      checkpoints_imported: 0,
+      files_imported: 0,
+      refs_imported: 0,
+      skipped: 0,
+      errors: 0
+    }
+
+    db_path = Enum.find(@session_store_db_paths, &File.exists?/1)
+
+    unless db_path do
+      if verbose,
+        do: require(Logger) && Logger.info("No session-store.db found, skipping")
+
+      {:ok, stats}
+    else
+      {:ok, conn} = Exqlite.Sqlite3.open(db_path, mode: :readonly)
+
+      try do
+        stats = import_ss_sessions_and_turns(conn, stats, verbose)
+        stats = import_ss_checkpoints(conn, stats, verbose)
+        stats = import_ss_files(conn, stats, verbose)
+        stats = import_ss_refs(conn, stats, verbose)
+
+        {:ok, stats}
+      after
+        Exqlite.Sqlite3.close(conn)
+      end
+    end
+  rescue
+    e -> {:error, Exception.message(e)}
+  end
+
+  defp import_ss_sessions_and_turns(conn, stats, verbose) do
+    # Get all sessions with their turn counts
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(
+        conn,
+        "SELECT s.id, s.cwd, s.repository, s.branch, s.summary, s.created_at, s.updated_at, count(t.id) as tc FROM sessions s LEFT JOIN turns t ON s.id = t.session_id GROUP BY s.id"
+      )
+
+    rows = fetch_all_rows(conn, stmt)
+    Exqlite.Sqlite3.release(conn, stmt)
+
+    {existing_ids, live_ids} = load_existing_session_ids()
+
+    Enum.reduce(rows, stats, fn [
+                                  sid,
+                                  cwd,
+                                  _repo,
+                                  branch,
+                                  summary,
+                                  created_at,
+                                  updated_at,
+                                  turn_count
+                                ],
+                                stats ->
+      prefixed = CopilotLv.Sessions.Session.prefixed_id(:copilot, sid)
+
+      cond do
+        MapSet.member?(live_ids, sid) ->
+          %{stats | skipped: stats.skipped + 1}
+
+        not MapSet.member?(existing_ids, sid) and (turn_count || 0) > 0 ->
+          # Session not in our DB but has turns — create it
+          import_ss_new_session(
+            conn,
+            sid,
+            prefixed,
+            cwd,
+            branch,
+            summary,
+            created_at,
+            updated_at,
+            stats,
+            verbose
+          )
+
+        MapSet.member?(existing_ids, sid) ->
+          # Session exists — merge in additional data (checkpoints, etc. handled separately)
+          maybe_update_ss_metadata(prefixed, cwd, branch, summary, stats)
+
+        true ->
+          %{stats | skipped: stats.skipped + 1}
+      end
+    end)
+  end
+
+  defp import_ss_new_session(
+         conn,
+         sid,
+         prefixed,
+         cwd,
+         branch,
+         summary,
+         created_at,
+         updated_at,
+         stats,
+         verbose
+       ) do
+    title =
+      if summary do
+        summary |> String.split("\n") |> hd() |> String.trim() |> String.slice(0, 120)
+      end
+
+    jido_session = %JidoSessions.Session{
+      id: prefixed,
+      agent: :copilot,
+      source: :imported,
+      status: :stopped,
+      cwd: cwd || "unknown",
+      summary: summary,
+      title: title,
+      branch: branch,
+      started_at: parse_timestamp(created_at),
+      stopped_at: parse_timestamp(updated_at)
+    }
+
+    case SessionStoreImpl.upsert_session(jido_session) do
+      {:ok, _} ->
+        # Import turns as events
+        turn_count = import_ss_turns(conn, sid, prefixed)
+
+        if verbose do
+          require Logger
+          Logger.info("session-store.db: imported #{sid} (#{turn_count} turns)")
+        end
+
+        %{
+          stats
+          | sessions_created: stats.sessions_created + 1,
+            turns_imported: stats.turns_imported + turn_count
+        }
+
+      {:error, _} ->
+        %{stats | errors: stats.errors + 1}
+    end
+  end
+
+  defp import_ss_turns(conn, sid, prefixed) do
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(
+        conn,
+        "SELECT turn_index, user_message, assistant_response, timestamp FROM turns WHERE session_id = '#{sid}' ORDER BY turn_index"
+      )
+
+    rows = fetch_all_rows(conn, stmt)
+    Exqlite.Sqlite3.release(conn, stmt)
+
+    # Convert turns into events (user message + assistant response per turn)
+    entries =
+      rows
+      |> Enum.flat_map(fn [turn_index, user_msg, asst_resp, timestamp] ->
+        seq_base = turn_index * 2 + 1
+
+        user_event =
+          if user_msg do
+            %{
+              type: "user.message",
+              data: %{"content" => user_msg, "turnIndex" => turn_index},
+              timestamp: parse_timestamp(timestamp),
+              sequence: seq_base,
+              event_id: nil,
+              parent_event_id: nil
+            }
+          end
+
+        asst_event =
+          if asst_resp do
+            %{
+              type: "assistant.message",
+              data: %{"content" => asst_resp, "turnIndex" => turn_index},
+              timestamp: parse_timestamp(timestamp),
+              sequence: seq_base + 1,
+              event_id: nil,
+              parent_event_id: nil
+            }
+          end
+
+        [user_event, asst_event] |> Enum.reject(&is_nil/1)
+      end)
+
+    case SessionStoreImpl.insert_events(prefixed, entries) do
+      {:ok, count} -> count
+      _ -> 0
+    end
+  end
+
+  defp maybe_update_ss_metadata(prefixed, cwd, branch, summary, stats) do
+    case SessionStoreImpl.get_session(prefixed) do
+      {:ok, existing} ->
+        needs_update =
+          (is_nil(existing.summary) and not is_nil(summary)) or
+            (is_nil(existing.branch) and not is_nil(branch)) or
+            (is_nil(existing.cwd) and not is_nil(cwd))
+
+        if needs_update do
+          title =
+            if summary do
+              summary |> String.split("\n") |> hd() |> String.trim() |> String.slice(0, 120)
+            end
+
+          updated = %JidoSessions.Session{
+            existing
+            | summary: existing.summary || summary,
+              title: existing.title || title,
+              branch: existing.branch || branch,
+              cwd: if(existing.cwd == "unknown", do: cwd || existing.cwd, else: existing.cwd)
+          }
+
+          SessionStoreImpl.upsert_session(updated)
+          %{stats | sessions_updated: stats.sessions_updated + 1}
+        else
+          %{stats | skipped: stats.skipped + 1}
+        end
+
+      _ ->
+        %{stats | skipped: stats.skipped + 1}
+    end
+  end
+
+  defp import_ss_checkpoints(conn, stats, _verbose) do
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(
+        conn,
+        "SELECT session_id, checkpoint_number, title, overview, history, work_done, technical_details, important_files, next_steps FROM checkpoints"
+      )
+
+    rows = fetch_all_rows(conn, stmt)
+    Exqlite.Sqlite3.release(conn, stmt)
+
+    count =
+      Enum.reduce(rows, 0, fn [
+                                sid,
+                                number,
+                                title,
+                                overview,
+                                history,
+                                work_done,
+                                tech,
+                                files,
+                                next
+                              ],
+                              acc ->
+        prefixed = CopilotLv.Sessions.Session.prefixed_id(:copilot, sid)
+
+        if SessionStoreImpl.session_exists?(prefixed) do
+          cp = %{
+            number: number,
+            title: title,
+            overview: overview,
+            history: history,
+            work_done: work_done,
+            technical_details: tech,
+            important_files: files,
+            next_steps: next
+          }
+
+          SessionStoreImpl.insert_checkpoints(prefixed, [cp])
+          acc + 1
+        else
+          acc
+        end
+      end)
+
+    %{stats | checkpoints_imported: stats.checkpoints_imported + count}
+  end
+
+  defp import_ss_files(conn, stats, _verbose) do
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(
+        conn,
+        "SELECT session_id, file_path, tool_name, turn_index, first_seen_at FROM session_files"
+      )
+
+    rows = fetch_all_rows(conn, stmt)
+    Exqlite.Sqlite3.release(conn, stmt)
+
+    count =
+      Enum.reduce(rows, 0, fn [sid, file_path, tool_name, turn_index, first_seen_at], acc ->
+        prefixed = CopilotLv.Sessions.Session.prefixed_id(:copilot, sid)
+
+        if SessionStoreImpl.session_exists?(prefixed) do
+          f = %{
+            file_path: file_path,
+            tool_name: tool_name,
+            turn_index: turn_index,
+            first_seen_at: first_seen_at
+          }
+
+          SessionStoreImpl.upsert_session_files(prefixed, [f])
+          acc + 1
+        else
+          acc
+        end
+      end)
+
+    %{stats | files_imported: stats.files_imported + count}
+  end
+
+  defp import_ss_refs(conn, stats, _verbose) do
+    {:ok, stmt} =
+      Exqlite.Sqlite3.prepare(
+        conn,
+        "SELECT session_id, ref_type, ref_value, turn_index, created_at FROM session_refs"
+      )
+
+    rows = fetch_all_rows(conn, stmt)
+    Exqlite.Sqlite3.release(conn, stmt)
+
+    count =
+      Enum.reduce(rows, 0, fn [sid, ref_type, ref_value, turn_index, created_at], acc ->
+        prefixed = CopilotLv.Sessions.Session.prefixed_id(:copilot, sid)
+
+        if SessionStoreImpl.session_exists?(prefixed) do
+          r = %{
+            ref_type: ref_type,
+            ref_value: ref_value,
+            turn_index: turn_index,
+            created_at: created_at
+          }
+
+          SessionStoreImpl.upsert_session_refs(prefixed, [r])
+          acc + 1
+        else
+          acc
+        end
+      end)
+
+    %{stats | refs_imported: stats.refs_imported + count}
+  end
 end

@@ -148,7 +148,7 @@ defmodule CopilotLv.SessionStoreImpl do
   def event_count(session_id) do
     import Ecto.Query, only: [from: 2]
 
-    Repo.one(from e in "events", where: e.session_id == ^session_id, select: count())
+    Repo.one(from(e in "events", where: e.session_id == ^session_id, select: count()))
   end
 
   @doc "Updates the session's event_count field from the actual events table count."
@@ -212,15 +212,26 @@ defmodule CopilotLv.SessionStoreImpl do
   @impl true
   def insert_checkpoints(session_id, checkpoints) do
     Enum.each(checkpoints, fn cp ->
-      Checkpoint
-      |> Ash.Changeset.for_create(:create, %{
+      attrs = %{
         session_id: session_id,
         number: cp.number,
         title: cp.title,
-        filename: cp.filename,
-        content: cp.content
-      })
-      |> Ash.create!()
+        filename: cp[:filename],
+        content: cp[:content],
+        overview: cp[:overview],
+        history: cp[:history],
+        work_done: cp[:work_done],
+        technical_details: cp[:technical_details],
+        important_files: cp[:important_files],
+        next_steps: cp[:next_steps]
+      }
+
+      changeset = Ash.Changeset.for_create(Checkpoint, :upsert, attrs)
+
+      case Ash.create(changeset) do
+        {:ok, _} -> :ok
+        {:error, _} -> :ok
+      end
     end)
 
     :ok
@@ -326,6 +337,50 @@ defmodule CopilotLv.SessionStoreImpl do
   end
 
   # ── Private helpers ──
+
+  alias CopilotLv.Sessions.{SessionFile, SessionRef}
+
+  @doc "Upsert session files (which files were touched during a session)."
+  def upsert_session_files(session_id, files) do
+    Enum.each(files, fn f ->
+      changeset =
+        Ash.Changeset.for_create(SessionFile, :upsert, %{
+          session_id: session_id,
+          file_path: f.file_path,
+          tool_name: f[:tool_name],
+          turn_index: f[:turn_index],
+          first_seen_at: f[:first_seen_at]
+        })
+
+      case Ash.create(changeset) do
+        {:ok, _} -> :ok
+        {:error, _} -> :ok
+      end
+    end)
+
+    :ok
+  end
+
+  @doc "Upsert session refs (git commits, PRs, issues referenced)."
+  def upsert_session_refs(session_id, refs) do
+    Enum.each(refs, fn r ->
+      changeset =
+        Ash.Changeset.for_create(SessionRef, :upsert, %{
+          session_id: session_id,
+          ref_type: r.ref_type,
+          ref_value: r.ref_value,
+          turn_index: r[:turn_index],
+          created_at: r[:created_at]
+        })
+
+      case Ash.create(changeset) do
+        {:ok, _} -> :ok
+        {:error, _} -> :ok
+      end
+    end)
+
+    :ok
+  end
 
   defp session_to_attrs(%JidoSessions.Session{} = s) do
     %{

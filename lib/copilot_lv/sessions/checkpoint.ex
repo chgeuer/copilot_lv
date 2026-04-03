@@ -14,6 +14,14 @@ defmodule CopilotLv.Sessions.Checkpoint do
     attribute(:title, :string)
     attribute(:filename, :string)
     attribute(:content, :string)
+
+    # Structured fields from session-store.db (richer than markdown content)
+    attribute(:overview, :string)
+    attribute(:history, :string)
+    attribute(:work_done, :string)
+    attribute(:technical_details, :string)
+    attribute(:important_files, :string)
+    attribute(:next_steps, :string)
   end
 
   relationships do
@@ -23,12 +31,60 @@ defmodule CopilotLv.Sessions.Checkpoint do
     end
   end
 
+  identities do
+    identity(:unique_checkpoint_per_session, [:session_id, :number])
+  end
+
   actions do
     defaults([:read])
 
     create :create do
       primary?(true)
-      accept([:number, :title, :filename, :content, :session_id])
+
+      accept([
+        :number,
+        :title,
+        :filename,
+        :content,
+        :overview,
+        :history,
+        :work_done,
+        :technical_details,
+        :important_files,
+        :next_steps,
+        :session_id
+      ])
+    end
+
+    create :upsert do
+      accept([
+        :number,
+        :title,
+        :filename,
+        :content,
+        :overview,
+        :history,
+        :work_done,
+        :technical_details,
+        :important_files,
+        :next_steps,
+        :session_id
+      ])
+
+      upsert?(true)
+      upsert_identity(:unique_checkpoint_per_session)
+
+      upsert_fields([
+        :title,
+        :filename,
+        :content,
+        :overview,
+        :history,
+        :work_done,
+        :technical_details,
+        :important_files,
+        :next_steps
+      ])
     end
 
     read :for_session do

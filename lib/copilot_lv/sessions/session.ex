@@ -82,6 +82,8 @@ defmodule CopilotLv.Sessions.Session do
     has_many(:checkpoints, CopilotLv.Sessions.Checkpoint)
     has_many(:artifacts, CopilotLv.Sessions.SessionArtifact)
     has_many(:todos, CopilotLv.Sessions.SessionTodo)
+    has_many(:files, CopilotLv.Sessions.SessionFile)
+    has_many(:refs, CopilotLv.Sessions.SessionRef)
   end
 
   actions do
