@@ -4,6 +4,7 @@ defmodule CopilotLvWeb.SessionLive.Index do
   import CopilotLvWeb.DirTreePicker
   import CopilotLvWeb.FsBrowserPicker
   alias CopilotLv.SessionRegistry
+  alias CopilotLv.AgentPermissions
 
   require Ash.Query
 
@@ -52,6 +53,8 @@ defmodule CopilotLvWeb.SessionLive.Index do
       |> assign(:dir_picker_filter, "")
       |> assign(:fs_picker_open, false)
       |> assign(:fs_expanded_dirs, %{})
+      |> assign(:confirm_delete_id, nil)
+      |> assign(:permissions_modal, nil)
       |> assign_filtered_sessions()
 
     {:ok, socket}
@@ -78,22 +81,60 @@ defmodule CopilotLvWeb.SessionLive.Index do
     model = if model == "", do: nil, else: model
 
     if File.dir?(cwd) do
-      socket = assign(socket, :creating, true)
+      modal = %{
+        agent: agent_atom,
+        cwd: cwd,
+        model: model,
+        permissions: AgentPermissions.defaults(agent_atom),
+        options: AgentPermissions.options(agent_atom)
+      }
 
-      case SessionRegistry.create_session(cwd: cwd, model: model, agent: agent_atom) do
-        {:ok, id} ->
-          {:noreply, push_navigate(socket, to: ~p"/session/#{id}")}
-
-        {:error, reason} ->
-          socket =
-            socket
-            |> assign(:creating, false)
-            |> put_flash(:error, "Failed to create session: #{inspect(reason)}")
-
-          {:noreply, socket}
-      end
+      {:noreply, assign(socket, :permissions_modal, modal)}
     else
       {:noreply, put_flash(socket, :error, "Directory does not exist: #{cwd}")}
+    end
+  end
+
+  def handle_event("close_permissions_modal", _params, socket) do
+    {:noreply, assign(socket, :permissions_modal, nil)}
+  end
+
+  def handle_event("update_permission", %{"key" => key, "value" => value}, socket) do
+    modal = socket.assigns.permissions_modal
+    updated_perms = Map.put(modal.permissions, key, value)
+    {:noreply, assign(socket, :permissions_modal, %{modal | permissions: updated_perms})}
+  end
+
+  def handle_event("toggle_permission", %{"key" => key}, socket) do
+    modal = socket.assigns.permissions_modal
+    current = modal.permissions[key]
+    new_val = if current == "true" or current == true, do: "false", else: "true"
+    updated_perms = Map.put(modal.permissions, key, new_val)
+    {:noreply, assign(socket, :permissions_modal, %{modal | permissions: updated_perms})}
+  end
+
+  def handle_event("confirm_create_session", _params, socket) do
+    modal = socket.assigns.permissions_modal
+    permissions = AgentPermissions.from_params(modal.agent, modal.permissions)
+
+    socket = socket |> assign(:creating, true) |> assign(:permissions_modal, nil)
+
+    case SessionRegistry.create_session(
+           cwd: modal.cwd,
+           model: modal.model,
+           agent: modal.agent,
+           permissions: permissions
+         ) do
+      {:ok, id} ->
+        {:noreply, push_navigate(socket, to: ~p"/session/#{id}")}
+
+      {:error, reason} ->
+        socket =
+          socket
+          |> assign(:creating, false)
+          |> put_flash(:error, "Failed to create session: #{inspect(reason)}")
+
+        {:noreply, socket}
     end
   end
 
@@ -234,6 +275,14 @@ defmodule CopilotLvWeb.SessionLive.Index do
      |> assign_filtered_sessions()}
   end
 
+  def handle_event("confirm_delete", %{"id" => id}, socket) do
+    {:noreply, assign(socket, :confirm_delete_id, id)}
+  end
+
+  def handle_event("cancel_delete", _params, socket) do
+    {:noreply, assign(socket, :confirm_delete_id, nil)}
+  end
+
   def handle_event("delete_session", %{"id" => id}, socket) do
     case SessionRegistry.delete_session(id) do
       :ok ->
@@ -242,6 +291,7 @@ defmodule CopilotLvWeb.SessionLive.Index do
         {:noreply,
          socket
          |> put_flash(:info, "Session deleted")
+         |> assign(:confirm_delete_id, nil)
          |> assign(:active_sessions, load_active_sessions())
          |> assign(:filter_dirs, filter_dirs)
          |> assign(:filter_models, filter_models)
@@ -350,6 +400,7 @@ defmodule CopilotLvWeb.SessionLive.Index do
     sessions =
       CopilotLv.Sessions.Session
       |> Ash.Query.for_read(:list_all)
+      |> Ash.Query.filter(status == :stopped)
       |> Ash.read!()
 
     dirs =
@@ -468,11 +519,19 @@ defmodule CopilotLvWeb.SessionLive.Index do
   defp agent_badge_class(:pi), do: "badge-secondary"
   defp agent_badge_class(_), do: "badge-ghost"
 
-  defp agent_cli_hint("claude", cwd), do: "cd #{cwd} && claude"
-  defp agent_cli_hint("codex", cwd), do: "cd #{cwd} && codex"
-  defp agent_cli_hint("gemini", cwd), do: "cd #{cwd} && gemini"
-  defp agent_cli_hint("pi", cwd), do: "cd #{cwd} && pi"
-  defp agent_cli_hint(_, cwd), do: "cd #{cwd}"
+  defp agent_icon(:copilot), do: "🤖"
+  defp agent_icon(:claude), do: "🟠"
+  defp agent_icon(:codex), do: "🔵"
+  defp agent_icon(:gemini), do: "🟢"
+  defp agent_icon(:pi), do: "🟣"
+  defp agent_icon(_), do: "🤖"
+
+  defp agent_label(:copilot), do: "Copilot"
+  defp agent_label(:claude), do: "Claude"
+  defp agent_label(:codex), do: "Codex"
+  defp agent_label(:gemini), do: "Gemini"
+  defp agent_label(:pi), do: "Pi"
+  defp agent_label(_), do: "Agent"
 
   defp shorten_path(path) do
     home = System.user_home!()
@@ -736,14 +795,32 @@ defmodule CopilotLvWeb.SessionLive.Index do
                   </div>
                   <div class="flex items-center gap-2">
                     <%= unless session.starred do %>
-                      <button
-                        phx-click="delete_session"
-                        phx-value-id={session.id}
-                        data-confirm="Delete this session? This removes it from the database and disk permanently."
-                        class="btn btn-xs btn-error btn-outline opacity-0 group-hover:opacity-100 transition-opacity"
-                      >
-                        Delete
-                      </button>
+                      <%= if @confirm_delete_id == session.id do %>
+                        <div class="flex items-center gap-1">
+                          <span class="text-xs text-error">Delete?</span>
+                          <button
+                            phx-click="delete_session"
+                            phx-value-id={session.id}
+                            class="btn btn-xs btn-error"
+                          >
+                            Yes
+                          </button>
+                          <button
+                            phx-click="cancel_delete"
+                            class="btn btn-xs btn-ghost"
+                          >
+                            No
+                          </button>
+                        </div>
+                      <% else %>
+                        <button
+                          phx-click="confirm_delete"
+                          phx-value-id={session.id}
+                          class="btn btn-xs btn-error btn-outline opacity-0 group-hover:opacity-100 transition-opacity"
+                        >
+                          Delete
+                        </button>
+                      <% end %>
                     <% end %>
                     <div class="text-xs text-base-content/40 whitespace-nowrap">
                       {format_date(session.started_at)}
@@ -771,6 +848,110 @@ defmodule CopilotLvWeb.SessionLive.Index do
         <% end %>
       </div>
     </div>
+
+    <%!-- Permissions Modal --%>
+    <%= if @permissions_modal do %>
+      <div
+        class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+        id="permissions-modal"
+        phx-window-keydown="close_permissions_modal"
+        phx-key="Escape"
+      >
+        <div class="bg-base-100 rounded-2xl shadow-2xl border border-base-300 w-full max-w-lg mx-4 overflow-hidden">
+          <%!-- Header --%>
+          <div class="flex items-center justify-between px-6 pt-5 pb-3">
+            <div class="flex items-center gap-2">
+              <span class="text-xl">{agent_icon(@permissions_modal.agent)}</span>
+              <h3 class="text-lg font-semibold text-base-content">
+                New {agent_label(@permissions_modal.agent)} Session
+              </h3>
+            </div>
+            <button
+              phx-click="close_permissions_modal"
+              class="btn btn-ghost btn-sm btn-circle text-base-content/50 hover:text-base-content"
+            >
+              <.icon name="hero-x-mark" class="w-5 h-5" />
+            </button>
+          </div>
+
+          <%!-- Session info --%>
+          <div class="px-6 pb-2 text-xs text-base-content/50 space-y-0.5">
+            <div class="flex items-center gap-2">
+              <span class="font-mono">{shorten_path(@permissions_modal.cwd)}</span>
+            </div>
+            <div>
+              Model:
+              <span class="badge badge-ghost badge-xs">{@permissions_modal.model || "auto"}</span>
+            </div>
+          </div>
+
+          <%!-- Divider --%>
+          <div class="px-6">
+            <div class="border-t border-base-300 my-2"></div>
+            <div class="text-xs font-semibold text-base-content/40 uppercase tracking-wider mb-3">
+              Permissions
+            </div>
+          </div>
+
+          <%!-- Permission options --%>
+          <div class="px-6 pb-4 space-y-4 max-h-[50vh] overflow-y-auto">
+            <%= for opt <- @permissions_modal.options do %>
+              <%= if opt.type == :toggle do %>
+                <div class="flex items-start gap-3">
+                  <% checked = @permissions_modal.permissions[opt.key] in ["true", true] %>
+                  <input
+                    type="checkbox"
+                    class="toggle toggle-sm toggle-primary mt-0.5"
+                    checked={checked}
+                    phx-click="toggle_permission"
+                    phx-value-key={opt.key}
+                  />
+                  <div class="flex-1 min-w-0">
+                    <div class="text-sm font-medium">{opt.label}</div>
+                    <div class="text-xs text-base-content/50">{opt.description}</div>
+                  </div>
+                </div>
+              <% else %>
+                <div>
+                  <label class="text-sm font-medium">{opt.label}</label>
+                  <div class="text-xs text-base-content/50 mb-1">{opt.description}</div>
+                  <form phx-change="update_permission">
+                    <input type="hidden" name="key" value={opt.key} />
+                    <select
+                      class="select select-bordered select-sm w-full"
+                      name="value"
+                    >
+                      <%= for {label, value} <- opt.choices do %>
+                        <option
+                          value={value}
+                          selected={@permissions_modal.permissions[opt.key] == value}
+                        >
+                          {label}
+                        </option>
+                      <% end %>
+                    </select>
+                  </form>
+                </div>
+              <% end %>
+            <% end %>
+
+            <%= if @permissions_modal.options == [] do %>
+              <div class="text-sm text-base-content/50 italic py-2">
+                No configurable permissions for this agent.
+              </div>
+            <% end %>
+          </div>
+
+          <%!-- Footer --%>
+          <div class="flex items-center justify-end gap-2 px-6 py-4 bg-base-200/50 border-t border-base-300">
+            <button phx-click="close_permissions_modal" class="btn btn-ghost btn-sm">Cancel</button>
+            <button phx-click="confirm_create_session" class="btn btn-primary btn-sm gap-1">
+              <span>{agent_icon(@permissions_modal.agent)}</span> Start Session
+            </button>
+          </div>
+        </div>
+      </div>
+    <% end %>
     """
   end
 

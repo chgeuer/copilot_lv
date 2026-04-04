@@ -276,7 +276,7 @@ defmodule CopilotLv.AgentDiscovery do
          agent_type,
          _config_dir,
          hostname,
-         source_path \\ nil
+         source_path
        ) do
     # Incremental event append (on_conflict: :nothing handles idempotency)
     import_events(existing_session.id, parsed.events)
