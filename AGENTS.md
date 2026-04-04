@@ -1,5 +1,20 @@
 This is a web application written using the Phoenix web framework.
 
+## Server management
+
+Use `just` recipes to manage the development server:
+
+- `just start` — start the server (foreground, visible output + logs to run.log)
+- `just start-bg` — start the server in the background (logs to run.log only)
+- `just open` — open the app in the browser (auto-starts if not running)
+- `just stop` — stop the running BEAM node gracefully
+- `just status` — check if the BEAM node is running
+- `just rpc '<expression>'` — evaluate an Elixir expression on the running node
+
+The server uses `phx-port` for stable port assignment. Never hardcode port numbers.
+
+**Important:** When you need to restart the server (e.g. after config changes), always use `just stop` then `just start`. Do not attempt to kill processes directly.
+
 ## Project guidelines
 
 - Use `mix precommit` alias when you are done with all changes and fix any pending issues
