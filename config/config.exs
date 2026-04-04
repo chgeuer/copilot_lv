@@ -33,7 +33,8 @@ config :esbuild,
   version: "0.25.4",
   copilot_lv: [
     args:
-      ~w(js/app.js --bundle --target=es2022 --outdir=../priv/static/assets/js --external:/fonts/* --external:/images/* --alias:@=.),
+      ~w(js/app.js --bundle --target=es2022 --outdir=../priv/static/assets/js --external:/fonts/* --external:/images/*) ++
+        ["--alias:@=.", "--alias:jido_tool_renderers=#{Path.join([Mix.Project.build_path(), "lib", "jido_tool_renderers", "priv", "static", "js"])}"],
     cd: Path.expand("../assets", __DIR__),
     env: %{"NODE_PATH" => [Path.expand("../deps", __DIR__), Mix.Project.build_path()]}
   ]
@@ -56,6 +57,13 @@ config :logger, :default_formatter,
 
 # Use Jason for JSON parsing in Phoenix
 config :phoenix, :json_library, Jason
+
+# Claude Agent SDK configuration
+# Extend tool execution timeout to 5 minutes (default 30s) to allow
+# interactive tools like ask_user to wait for user input.
+config :claude_agent_sdk,
+  tool_execution_ms: 300_000,
+  log_level: :info
 
 # Import environment specific config. This must remain at the bottom
 # of this file so it overrides the configuration defined above.

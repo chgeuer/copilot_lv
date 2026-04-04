@@ -25,43 +25,55 @@ import {LiveSocket} from "phoenix_live_view"
 import {hooks as colocatedHooks} from "phoenix-colocated/copilot_lv"
 import topbar from "../vendor/topbar"
 
-import {MarkdownContent, CopyMarkdown, UserMessage} from "./markdown"
+import {
+  MarkdownContent, CopyMarkdown, UserMessage, ToolGroup, AutoScroll,
+  configureSessionViewer
+} from "jido_tool_renderers/session_viewer_hooks"
 import {XtermSession} from "../vendor/xterm_hook"
 
-const ToolGroup = {
-  beforeUpdate() {
-    const details = this.el.querySelector("details")
-    if (details) this._open = details.open
-  },
-  updated() {
-    const details = this.el.querySelector("details")
-    if (details && this._open !== undefined) {
-      details.open = this._open
-    }
-  }
+// ── copilot_lv-specific: file link rewriting ──
+
+const LOCAL_FILE_LINK_RE = /^https?:\/\/localhost:\d+(\/\S+?\.\w{1,10})$/
+const ABSPATH_LINK_RE = /^(\/(?:home|tmp|var|usr|etc|opt|mnt)\/\S+?\.\w{1,10})$/
+
+function extractLineFromText(text) {
+  const m = text.match(/:(\d+)$/)
+  return m ? parseInt(m[1], 10) : 0
 }
 
-const AutoScroll = {
-  mounted() {
-    this.scrollEl = this.el.querySelector("#event-scroll")
-    this.autoScroll = true
-
-    if (this.scrollEl) {
-      this.scrollEl.addEventListener("scroll", () => {
-        const { scrollTop, scrollHeight, clientHeight } = this.scrollEl
-        this.autoScroll = scrollHeight - scrollTop - clientHeight < 50
-      })
-    }
-
-    this.handleEvent("scroll-bottom", () => {
-      if (this.autoScroll && this.scrollEl) {
-        requestAnimationFrame(() => {
-          this.scrollEl.scrollTop = this.scrollEl.scrollHeight
-        })
-      }
+function rewriteFileLinks(container, tokenMap, hook) {
+  if (!tokenMap || Object.keys(tokenMap).length === 0) return
+  const links = container.querySelectorAll("a[href]")
+  for (const link of links) {
+    if (link.dataset.fileToken) continue
+    const href = link.getAttribute("href")
+    let lookupKey = null
+    const localhostMatch = href.match(LOCAL_FILE_LINK_RE)
+    const abspathMatch = href.match(ABSPATH_LINK_RE)
+    if (localhostMatch) lookupKey = href
+    else if (abspathMatch) lookupKey = abspathMatch[1]
+    if (!lookupKey) continue
+    const entry = tokenMap[lookupKey]
+    if (!entry) continue
+    const line = extractLineFromText(link.textContent)
+    link.removeAttribute("href")
+    link.style.cursor = "pointer"
+    link.classList.add("file-viewer-link")
+    link.title = `View ${entry.path}${line ? `:${line}` : ""}`
+    link.dataset.fileToken = entry.token
+    link.dataset.fileLine = line
+    link.addEventListener("click", (e) => {
+      e.preventDefault()
+      hook.pushEvent("view_file", { token: entry.token, line })
     })
   }
 }
+
+configureSessionViewer({
+  postRender(container, hook) {
+    rewriteFileLinks(container, hook._fileTokens, hook)
+  }
+})
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {
