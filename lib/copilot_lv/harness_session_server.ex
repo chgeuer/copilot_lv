@@ -159,7 +159,7 @@ defmodule CopilotLv.HarnessSessionServer do
 
   @impl true
   def handle_info(
-        {:harness_event, %Jido.Harness.Event{type: :codex_request_user_input} = event},
+        {:harness_event, %Jido.Harness.Event{type: :ask_user} = event},
         state
       ) do
     handle_codex_user_input_request(state, event)
@@ -413,7 +413,7 @@ defmodule CopilotLv.HarnessSessionServer do
       :thinking_delta ->
         {"assistant.reasoning", %{"content" => payload["text"]}}
 
-      :tool_call ->
+      :tool_use_start ->
         {"tool.execution_start",
          %{
            "toolName" => payload["name"],
@@ -421,7 +421,7 @@ defmodule CopilotLv.HarnessSessionServer do
            "arguments" => payload["input"] || payload["arguments"] || %{}
          }}
 
-      :tool_result ->
+      :tool_use_end ->
         {"tool.execution_complete",
          %{
            "toolCallId" => payload["call_id"],
@@ -448,10 +448,10 @@ defmodule CopilotLv.HarnessSessionServer do
       :user_message ->
         {"user.message", %{"content" => payload["text"]}}
 
-      :codex_turn_started ->
+      :turn_start ->
         {"assistant.turn_start", %{}}
 
-      :codex_request_user_input ->
+      :ask_user ->
         {"ask_user.request",
          %{
            "questions" => payload["questions"] || [],

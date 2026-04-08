@@ -186,11 +186,17 @@ defmodule CopilotLv.Sessions.Digest do
             case child_type do
               t when t in ["assistant.message.block", "assistant_message"] ->
                 content = child_data["content"] || ""
-                if String.trim(content) != "", do: [%{type: "assistant.message.block", content: content}], else: []
+
+                if String.trim(content) != "",
+                  do: [%{type: "assistant.message.block", content: content}],
+                  else: []
 
               t when t in ["assistant.reasoning", "assistant_reasoning"] ->
                 content = child_data["content"] || ""
-                if String.trim(content) != "", do: [%{type: "assistant.reasoning", content: content}], else: []
+
+                if String.trim(content) != "",
+                  do: [%{type: "assistant.reasoning", content: content}],
+                  else: []
 
               _ ->
                 []
@@ -280,20 +286,26 @@ defmodule CopilotLv.Sessions.Digest do
     entries =
       checkpoints
       |> Enum.map(fn checkpoint ->
-        header = "### Checkpoint #{checkpoint.number}: #{checkpoint.title || checkpoint.filename || "Untitled"}"
+        header =
+          "### Checkpoint #{checkpoint.number}: #{checkpoint.title || checkpoint.filename || "Untitled"}"
 
         structured_parts =
           [
             if(checkpoint.overview && String.trim(checkpoint.overview) != "",
-              do: "\n**Overview:**\n#{checkpoint.overview}"),
+              do: "\n**Overview:**\n#{checkpoint.overview}"
+            ),
             if(checkpoint.work_done && String.trim(checkpoint.work_done) != "",
-              do: "\n**Work Done:**\n#{checkpoint.work_done}"),
+              do: "\n**Work Done:**\n#{checkpoint.work_done}"
+            ),
             if(checkpoint.next_steps && String.trim(checkpoint.next_steps) != "",
-              do: "\n**Next Steps:**\n#{checkpoint.next_steps}"),
+              do: "\n**Next Steps:**\n#{checkpoint.next_steps}"
+            ),
             if(checkpoint.technical_details && String.trim(checkpoint.technical_details) != "",
-              do: "\n**Technical Details:**\n#{checkpoint.technical_details}"),
+              do: "\n**Technical Details:**\n#{checkpoint.technical_details}"
+            ),
             if(checkpoint.important_files && String.trim(checkpoint.important_files) != "",
-              do: "\n**Important Files:**\n#{checkpoint.important_files}")
+              do: "\n**Important Files:**\n#{checkpoint.important_files}"
+            )
           ]
           |> Enum.reject(&is_nil/1)
 

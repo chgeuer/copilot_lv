@@ -820,7 +820,9 @@ defmodule CopilotLvWeb.SessionLive.Index do
           <div class="alert shadow-lg flex items-center justify-between">
             <div class="flex items-center gap-2">
               <span class="font-medium">
-                {MapSet.size(@selected_ids)} session{if MapSet.size(@selected_ids) > 1, do: "s", else: ""} selected
+                {MapSet.size(@selected_ids)} session{if MapSet.size(@selected_ids) > 1,
+                  do: "s",
+                  else: ""} selected
               </span>
             </div>
             <div class="flex items-center gap-2">

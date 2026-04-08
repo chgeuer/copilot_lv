@@ -34,7 +34,10 @@ config :esbuild,
   copilot_lv: [
     args:
       ~w(js/app.js --bundle --target=es2022 --outdir=../priv/static/assets/js --external:/fonts/* --external:/images/*) ++
-        ["--alias:@=.", "--alias:jido_tool_renderers=#{Path.join([Mix.Project.build_path(), "lib", "jido_tool_renderers", "priv", "static", "js"])}"],
+        [
+          "--alias:@=.",
+          "--alias:jido_tool_renderers=#{Path.join([Mix.Project.build_path(), "lib", "jido_tool_renderers", "priv", "static", "js"])}"
+        ],
     cd: Path.expand("../assets", __DIR__),
     env: %{"NODE_PATH" => [Path.expand("../deps", __DIR__), Mix.Project.build_path()]}
   ]
