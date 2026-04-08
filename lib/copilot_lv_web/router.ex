@@ -28,6 +28,7 @@ defmodule CopilotLvWeb.Router do
 
   scope "/api", CopilotLvWeb do
     get "/sessions/:session_ref/handoff.md", SessionHandoffController, :show
+    get "/sessions/:id/digest.md", SessionDigestController, :show
   end
 
   # MCP endpoint for ask_user tool (called by Copilot CLI)

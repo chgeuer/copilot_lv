@@ -61,6 +61,7 @@ defmodule CopilotLvWeb.FileViewer do
   Detects patterns like:
   - `http://localhost:PORT/absolute/path/to/file.ext`
   - Markdown links with absolute paths like `[text](/home/user/file.ext)`
+  - `<persisted-output>` blocks referencing saved-to file paths
   """
   def scan_and_sign(endpoint, text) when is_binary(text) do
     # Match http://localhost:PORT/absolute-path patterns
@@ -68,6 +69,10 @@ defmodule CopilotLvWeb.FileViewer do
 
     # Match bare absolute-path links: [text](/home/...) or [text](/tmp/...)
     abspath_regex = Regex.compile!("\\]\\((/(home|tmp|var|usr|etc|opt|mnt)/[^)\\s]+)\\)")
+
+    # Match file paths inside <persisted-output> blocks:
+    # "Full output saved to: /home/user/.../file.txt"
+    persisted_output_regex = ~r/saved to:\s+(\/\S+)/
 
     localhost_tokens =
       localhost_regex
@@ -93,7 +98,21 @@ defmodule CopilotLvWeb.FileViewer do
           acc
       end)
 
-    Map.merge(localhost_tokens, abspath_tokens)
+    persisted_output_tokens =
+      persisted_output_regex
+      |> Regex.scan(text)
+      |> Enum.reduce(%{}, fn
+        [_full, file_path], acc ->
+          token = sign_path(endpoint, file_path)
+          Map.put(acc, file_path, %{token: token, path: file_path})
+
+        _, acc ->
+          acc
+      end)
+
+    localhost_tokens
+    |> Map.merge(abspath_tokens)
+    |> Map.merge(persisted_output_tokens)
   end
 
   def scan_and_sign(_endpoint, _non_binary), do: %{}

@@ -92,9 +92,16 @@ defmodule CopilotLvWeb.SessionLive.Show do
           |> Ash.read!()
           |> sort_artifacts()
 
-        # Pre-process events to accumulate assistant messages for markdown rendering
-        # Harness-managed agents store events in copilot-native format, so use :copilot parser
-        event_format = if (db_session.agent || :copilot) in [:claude, :codex, :gemini], do: :copilot, else: db_session.agent || :copilot
+        # All events in the database use the canonical copilot vocabulary,
+        # regardless of which agent produced them. Normalization happens at
+        # import time (SessionWatcher / HarnessSessionServer), so the UI
+        # layer always uses the :copilot parser for grouping/rendering.
+        #
+        # For legacy sessions that were imported before normalization was
+        # added, detect the format from event types and fall back to the
+        # agent-specific parser.
+        event_format = detect_event_format(db_session.agent || :copilot, db_events)
+
         stream_events = EventStream.build_events(db_events, event_format)
 
         socket =
@@ -200,7 +207,13 @@ defmodule CopilotLvWeb.SessionLive.Show do
         |> assign(:accumulator, Accumulator.new())
         |> stream_insert(:events, user_event, at: -1)
 
-      dispatch_send_prompt(socket.assigns.agent, socket.assigns.session_id, full_prompt, send_opts)
+      dispatch_send_prompt(
+        socket.assigns.agent,
+        socket.assigns.session_id,
+        full_prompt,
+        send_opts
+      )
+
       {:noreply, push_event(socket, "scroll-bottom", %{})}
     end
   end
@@ -481,7 +494,7 @@ defmodule CopilotLvWeb.SessionLive.Show do
     line = if is_binary(line), do: String.to_integer(line), else: line
 
     with {:ok, path} <- FileViewer.verify_token(CopilotLvWeb.Endpoint, token),
-         allowed_bases <- [socket.assigns.cwd, socket.assigns.git_root] |> Enum.reject(&is_nil/1),
+         allowed_bases <- file_viewer_allowed_bases(socket),
          true <- FileViewer.path_allowed?(path, allowed_bases),
          {:ok, content} <- FileViewer.read_file(path) do
       {:noreply,
@@ -685,6 +698,14 @@ defmodule CopilotLvWeb.SessionLive.Show do
               ☆
             <% end %>
           </button>
+          <.link
+            href={~p"/api/sessions/#{@session_id}/digest.md"}
+            class="btn btn-sm btn-ghost"
+            title="Download session digest as markdown"
+            download={"digest-#{@session_id}.md"}
+          >
+            📝
+          </.link>
           <%= if @active do %>
             <button phx-click="stop_session" class="btn btn-sm btn-error btn-outline">
               Stop
@@ -870,6 +891,7 @@ defmodule CopilotLvWeb.SessionLive.Show do
         <.ask_user_modal
           request={@ask_user_request}
           freeform_text={@ask_user_freeform}
+          agent={@agent}
         />
       <% end %>
 
@@ -1038,6 +1060,8 @@ defmodule CopilotLvWeb.SessionLive.Show do
       | metadata: Map.put(session_event.metadata, :session_id, assigns.session_id)
     }
 
+    session_event = sign_persisted_output_in_session_event(session_event)
+
     assigns = assign(assigns, :event, session_event)
     Rich.event_item(assigns)
   end
@@ -1115,7 +1139,7 @@ defmodule CopilotLvWeb.SessionLive.Show do
       </div>
 
       <div class="flex min-h-0 flex-1 flex-col gap-3 p-3">
-        <div class="min-h-[12rem] overflow-y-auto rounded-2xl border border-base-300 bg-base-100/70 p-2">
+        <div class="min-h-[8rem] max-h-[40%] shrink-0 overflow-y-auto rounded-2xl border border-base-300 bg-base-100/70 p-2">
           <%= if @inspector_tab == :checkpoints do %>
             <%= if @checkpoints == [] do %>
               <div
@@ -1625,11 +1649,20 @@ defmodule CopilotLvWeb.SessionLive.Show do
 
   # ── ask_user Modal ──
 
+  defp agent_display_name(:copilot), do: "Copilot"
+  defp agent_display_name(:claude), do: "Claude"
+  defp agent_display_name(:codex), do: "Codex"
+  defp agent_display_name(:gemini), do: "Gemini"
+  defp agent_display_name(other), do: to_string(other) |> String.capitalize()
+
   defp ask_user_modal(assigns) do
     choices = assigns.request.choices || []
     allow_freeform = Map.get(assigns.request, :allow_freeform, true)
     show_freeform = allow_freeform || choices == []
-    assigns = assign(assigns, choices: choices, show_freeform: show_freeform)
+    agent_label = agent_display_name(assigns[:agent] || :copilot)
+
+    assigns =
+      assign(assigns, choices: choices, show_freeform: show_freeform, agent_label: agent_label)
 
     ~H"""
     <div
@@ -1643,7 +1676,7 @@ defmodule CopilotLvWeb.SessionLive.Show do
         <div class="flex items-center justify-between px-6 pt-5 pb-3">
           <div class="flex items-center gap-2">
             <span class="text-xl">❓</span>
-            <h3 class="text-lg font-semibold text-base-content">Copilot needs your input</h3>
+            <h3 class="text-lg font-semibold text-base-content">{@agent_label} needs your input</h3>
           </div>
           <button
             phx-click="ask_user_dismiss"
@@ -1712,6 +1745,47 @@ defmodule CopilotLvWeb.SessionLive.Show do
   end
 
   # ── Helpers ──
+
+  # Detect whether stored events use the agent's native format or the copilot-native
+  # format produced by HarnessSessionServer.translate_event/1.
+  #
+  # Native Claude sessions (synced from ~/.claude) use event types like "user" and
+  # Native conversation event types that indicate events have NOT been normalized.
+  # Metadata types like "summary", "system", "session_meta" are preserved by the
+  # normalizer and don't indicate native format.
+  @native_claude_types MapSet.new(["user", "assistant"])
+  @native_codex_types MapSet.new(["response_item"])
+  @native_gemini_types MapSet.new(["gemini"])
+  @native_pi_types MapSet.new(["message"])
+
+  defp detect_event_format(agent, db_events) do
+    event_types = MapSet.new(db_events, & &1.type)
+
+    case agent do
+      :claude ->
+        if MapSet.size(MapSet.intersection(event_types, @native_claude_types)) > 0,
+          do: :claude,
+          else: :copilot
+
+      :codex ->
+        if MapSet.size(MapSet.intersection(event_types, @native_codex_types)) > 0,
+          do: :codex,
+          else: :copilot
+
+      :gemini ->
+        if MapSet.size(MapSet.intersection(event_types, @native_gemini_types)) > 0,
+          do: :gemini,
+          else: :copilot
+
+      :pi ->
+        if MapSet.size(MapSet.intersection(event_types, @native_pi_types)) > 0,
+          do: :pi,
+          else: :copilot
+
+      other ->
+        other
+    end
+  end
 
   defp build_checkpoint_entries(checkpoints, events) do
     compaction_index = build_compaction_index(events)
@@ -2092,7 +2166,7 @@ defmodule CopilotLvWeb.SessionLive.Show do
     ssh_prefix =
       if hostname && hostname not in [local_hostname(), nil], do: "ssh #{hostname} ", else: ""
 
-    cd = "cd #{cwd}"
+    cd = "cd '#{cwd}'"
 
     agent_cmd =
       case agent do
@@ -2243,7 +2317,56 @@ defmodule CopilotLvWeb.SessionLive.Show do
 
   defp enrich_user_message_with_pasted_content(event), do: event
 
+  # Sign file paths found in <persisted-output> blocks within tool call results
+  # so they can be opened in the file viewer via phx-click="view_file".
+  defp sign_persisted_output_in_session_event(
+         %Jido.ToolRenderers.SessionEvent{type: :tool_call, data: data} = event
+       ) do
+    result = data["result"]
+
+    content =
+      cond do
+        is_map(result) -> result["content"] || ""
+        is_binary(result) -> result
+        true -> ""
+      end
+
+    case Jido.ToolRenderers.Bash.parse_persisted_output(content) do
+      {%{file_path: file_path}, _remaining} when is_binary(file_path) ->
+        token = CopilotLvWeb.FileViewer.sign_path(CopilotLvWeb.Endpoint, file_path)
+        %{event | data: Map.put(data, "persisted_output_token", token)}
+
+      _ ->
+        event
+    end
+  end
+
+  defp sign_persisted_output_in_session_event(
+         %Jido.ToolRenderers.SessionEvent{type: :tool_group, data: data} = event
+       ) do
+    child_events = Map.get(data, "events", [])
+
+    updated_children =
+      Enum.map(child_events, &sign_persisted_output_in_session_event/1)
+
+    %{event | data: Map.put(data, "events", updated_children)}
+  end
+
+  defp sign_persisted_output_in_session_event(event), do: event
+
   # ── Paste File Management ──
+
+  # Directories where agents may persist large tool outputs (e.g. <persisted-output>)
+  @agent_data_dirs [
+    Path.join(System.user_home!(), ".claude/projects"),
+    Path.join(System.user_home!(), ".copilot/session-state"),
+    Path.join(System.user_home!(), ".local/state/.copilot/session-state")
+  ]
+
+  defp file_viewer_allowed_bases(socket) do
+    ([socket.assigns.cwd, socket.assigns.git_root] ++ @agent_data_dirs)
+    |> Enum.reject(&is_nil/1)
+  end
 
   @session_state_dirs [
     Path.join(System.user_home!(), ".copilot/session-state"),

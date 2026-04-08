@@ -145,7 +145,7 @@ defmodule CopilotLv.Sessions.Session do
     end
 
     read :list_all do
-      prepare(build(sort: [starred: :desc, started_at: :desc]))
+      prepare(build(sort: [starred: :desc, stopped_at: :desc_nils_last, started_at: :desc]))
     end
 
     read :active do

@@ -103,8 +103,12 @@ defmodule CopilotLv.MixProject do
       {:jido_signal, "~> 2.0", override: true},
       {:libgraph, "~> 0.16.1-mg.1", hex: :multigraph, override: true},
       {:jido_shell, agentjido_dep("jido_shell") ++ [override: true]},
-      {:jido_harness, agentjido_dep("jido_harness", branch: "fix/update-sprite-lifecycle-alias") ++ [override: true]},
-      {:jido_vfs, agentjido_dep("jido_vfs", branch: "fix/pin-chunk-size-in-bitstring-match") ++ [override: true]},
+      {:jido_harness,
+       agentjido_dep("jido_harness", branch: "fix/update-sprite-lifecycle-alias") ++
+         [override: true]},
+      {:jido_vfs,
+       agentjido_dep("jido_vfs", branch: "fix/pin-chunk-size-in-bitstring-match") ++
+         [override: true]},
       {:sprites, github: "mikehostetler/sprites-ex", override: true},
       {:ash, "~> 3.16"},
       {:ash_sqlite, "~> 0.2.15"},

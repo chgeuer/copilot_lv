@@ -28,6 +28,9 @@ defmodule CopilotLv.Application do
     opts = [strategy: :one_for_one, name: CopilotLv.Supervisor]
     result = Supervisor.start_link(children, opts)
 
+    # Initialize ETS table for Claude ask_user MCP tool context
+    CopilotLv.AskUser.ClaudeTool.init_context_table()
+
     # Register session-history models after Repo is started
     register_session_models()
 

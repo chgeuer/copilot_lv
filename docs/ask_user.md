@@ -178,7 +178,9 @@ Client (Elixir)                          Server (Copilot CLI)
 | File | Purpose |
 |------|---------|
 | `lib/copilot_lv/ask_user_broker.ex` | GenServer managing pending requests, blocking/unblocking callers, timeouts |
+| `lib/copilot_lv/ask_user/claude_tool.ex` | In-process MCP tool for Claude, ETS-based session context management |
 | `lib/copilot_lv/session_server.ex` | Defines `@ask_user_tool`, handles `{:server_tool_call, ...}`, spawns response Tasks |
+| `lib/copilot_lv/harness_session_server.ex` | Sets up Claude MCP tool, handles Codex `RequestUserInput`, translates events |
 | `lib/copilot_lv_web/live/session_live/show.ex` | Modal UI component, event handlers for choices/freeform/dismiss |
 
 ### jido_ghcopilot (library)
@@ -232,3 +234,47 @@ end
 - **Model switching**: When the wrapper performs a model switch (destroy + recreate session), external tools are re-registered automatically since both `session.create` and `session.resume` pass the `tools` parameter.
 - **Timeout**: Requests time out after 5 minutes via `AskUserBroker`. The LLM receives a timeout error and can retry or proceed without the answer.
 - **Session resume**: External tools are passed on `session.resume` as well, so they survive session restarts.
+
+## Multi-Agent ask_user Support
+
+The `ask_user` functionality is supported across all agent types with provider-specific mechanisms:
+
+### Copilot (SessionServer)
+
+Uses the Copilot CLI's **external tools** mechanism via bidirectional JSON-RPC. The `ask_user` tool is registered in `session.create`, and when the LLM calls it, the CLI sends a `tool.call` request back to the client. See the main documentation above.
+
+### Claude (HarnessSessionServer)
+
+Uses the Claude SDK's **in-process MCP tool** mechanism. A custom `ask_user` MCP tool is created as a `ClaudeAgentSDK.Tool` module that:
+
+1. **Registers** as an SDK MCP server with `ClaudeAgentSDK.create_sdk_mcp_server/1`
+2. **Passes** the server to Claude via `Options.mcp_servers` and `Options.allowed_tools`
+3. **Blocks** in the tool's `execute/1` callback on `AskUserBroker.request/4`
+4. **Returns** the user's response to Claude, which continues execution
+
+The session context (mapping MCP server → session ID) is stored in an ETS table (`CopilotLv.AskUser.ClaudeTool`) and cleaned up on session termination.
+
+**Key file**: `lib/copilot_lv/ask_user/claude_tool.ex`
+
+### Codex (HarnessSessionServer)
+
+Uses the Codex SDK's native **`RequestUserInput`** event. The Codex CLI sends `item/tool/requestUserInput` JSON-RPC requests when it needs user input, which the SDK maps to `:codex_request_user_input` harness events.
+
+The `HarnessSessionServer` intercepts these events:
+1. **Extracts** the question(s) and choices from the event payload
+2. **Broadcasts** `{:ask_user_request, ...}` to the LiveView via PubSub
+3. **Blocks** on `AskUserBroker.request/4` until the user responds
+
+### Gemini
+
+Gemini CLI does not currently have a native interactive tool callback mechanism. The `ask_user` tool is not available for Gemini sessions. This may be supported in the future via MCP server configuration.
+
+### Shared Components
+
+| Component | Role |
+|-----------|------|
+| `AskUserBroker` | Shared GenServer that blocks callers until the user responds or timeout (5 min) |
+| `ask_user_modal` (LiveView) | Agent-agnostic modal UI showing the question, choices, and freeform input |
+| `respond_to_ask_user` (LiveView) | Calls `AskUserBroker.respond/2` when user answers |
+
+The LiveView modal dynamically shows the agent name ("Copilot needs your input", "Claude needs your input", etc.) based on the session's `:agent` assign.

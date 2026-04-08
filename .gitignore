@@ -50,3 +50,4 @@ copilot_lv.db-wal
 
 # Dev node state
 .dev_node.pid
+*.db.bak

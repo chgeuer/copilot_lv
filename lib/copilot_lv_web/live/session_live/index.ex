@@ -55,6 +55,8 @@ defmodule CopilotLvWeb.SessionLive.Index do
       |> assign(:fs_expanded_dirs, %{})
       |> assign(:confirm_delete_id, nil)
       |> assign(:permissions_modal, nil)
+      |> assign(:selected_ids, MapSet.new())
+      |> assign(:confirm_delete_selected, false)
       |> assign_filtered_sessions()
 
     {:ok, socket}
@@ -307,6 +309,80 @@ defmodule CopilotLvWeb.SessionLive.Index do
     end
   end
 
+  def handle_event("toggle_select", %{"id" => id} = params, socket) do
+    ctrl = params["ctrl"] == "true"
+    selected = socket.assigns.selected_ids
+
+    selected =
+      cond do
+        ctrl && MapSet.member?(selected, id) ->
+          MapSet.delete(selected, id)
+
+        ctrl ->
+          MapSet.put(selected, id)
+
+        MapSet.member?(selected, id) && MapSet.size(selected) == 1 ->
+          MapSet.new()
+
+        true ->
+          MapSet.new([id])
+      end
+
+    {:noreply,
+     socket
+     |> assign(:selected_ids, selected)
+     |> assign(:confirm_delete_selected, false)}
+  end
+
+  def handle_event("clear_selection", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:selected_ids, MapSet.new())
+     |> assign(:confirm_delete_selected, false)}
+  end
+
+  def handle_event("confirm_delete_selected", _params, socket) do
+    {:noreply, assign(socket, :confirm_delete_selected, true)}
+  end
+
+  def handle_event("cancel_delete_selected", _params, socket) do
+    {:noreply, assign(socket, :confirm_delete_selected, false)}
+  end
+
+  def handle_event("delete_selected", _params, socket) do
+    selected = socket.assigns.selected_ids
+
+    {ok_count, err_count} =
+      Enum.reduce(selected, {0, 0}, fn id, {ok, err} ->
+        case SessionRegistry.delete_session(id) do
+          :ok -> {ok + 1, err}
+          _ -> {ok, err + 1}
+        end
+      end)
+
+    {filter_dirs, filter_models, filter_hosts, filter_agents} = load_filter_options()
+
+    flash =
+      case {ok_count, err_count} do
+        {n, 0} -> {:info, "Deleted #{n} session#{if n > 1, do: "s", else: ""}"}
+        {0, n} -> {:error, "Failed to delete #{n} session#{if n > 1, do: "s", else: ""}"}
+        {n, m} -> {:info, "Deleted #{n}, failed #{m}"}
+      end
+
+    {:noreply,
+     socket
+     |> put_flash(elem(flash, 0), elem(flash, 1))
+     |> assign(:selected_ids, MapSet.new())
+     |> assign(:confirm_delete_selected, false)
+     |> assign(:confirm_delete_id, nil)
+     |> assign(:active_sessions, load_active_sessions())
+     |> assign(:filter_dirs, filter_dirs)
+     |> assign(:filter_models, filter_models)
+     |> assign(:filter_hosts, filter_hosts)
+     |> assign(:filter_agents, filter_agents)
+     |> assign_filtered_sessions()}
+  end
+
   def handle_event("toggle_star", %{"id" => id}, socket) do
     SessionRegistry.toggle_star(id)
     {:noreply, assign_filtered_sessions(socket)}
@@ -549,7 +625,7 @@ defmodule CopilotLvWeb.SessionLive.Index do
   def render(assigns) do
     ~H"""
     <div class="min-h-screen bg-base-200 p-6">
-      <div class="max-w-5xl mx-auto space-y-6">
+      <div class="max-w-7xl mx-auto space-y-6">
         <div class="flex items-center justify-between">
           <h1 class="text-3xl font-bold">Copilot Sessions</h1>
           <div class="flex items-center gap-2">
@@ -739,18 +815,68 @@ defmodule CopilotLvWeb.SessionLive.Index do
           </div>
         </div>
 
+        <%!-- Bulk Action Bar --%>
+        <%= if MapSet.size(@selected_ids) > 0 do %>
+          <div class="alert shadow-lg flex items-center justify-between">
+            <div class="flex items-center gap-2">
+              <span class="font-medium">
+                {MapSet.size(@selected_ids)} session{if MapSet.size(@selected_ids) > 1, do: "s", else: ""} selected
+              </span>
+            </div>
+            <div class="flex items-center gap-2">
+              <%= if @confirm_delete_selected do %>
+                <span class="text-sm text-error font-medium">Delete all selected?</span>
+                <button phx-click="delete_selected" class="btn btn-sm btn-error">
+                  Yes, delete
+                </button>
+                <button phx-click="cancel_delete_selected" class="btn btn-sm btn-ghost">
+                  No
+                </button>
+              <% else %>
+                <button phx-click="confirm_delete_selected" class="btn btn-sm btn-error btn-outline">
+                  🗑 Delete selected
+                </button>
+              <% end %>
+              <button phx-click="clear_selection" class="btn btn-sm btn-ghost">
+                ✕ Clear
+              </button>
+            </div>
+          </div>
+        <% end %>
+
         <%!-- Session List --%>
-        <div class="space-y-1">
-          <%= for session <- @sessions do %>
-            <div class="card bg-base-100 shadow-sm hover:shadow-md transition-shadow group">
-              <div class="card-body py-3 px-4">
-                <div class="flex items-start justify-between gap-4">
-                  <div class="flex items-center gap-2 min-w-0 flex-1">
+        <div class="card bg-base-100 shadow-sm overflow-x-auto">
+          <table class="table table-sm table-zebra w-full">
+            <thead>
+              <tr class="text-xs text-base-content/60 uppercase tracking-wider">
+                <th class="w-8">★</th>
+                <th>Title</th>
+                <th>Host</th>
+                <th>Directory</th>
+                <th class="text-right">Events</th>
+                <th class="text-right">Last Activity</th>
+                <th class="w-16"></th>
+              </tr>
+            </thead>
+            <tbody id="session-list" phx-hook="CtrlClick">
+              <%= for session <- @sessions do %>
+                <tr
+                  id={"session-row-#{session.id}"}
+                  data-select-id={session.id}
+                  class={[
+                    "group cursor-pointer transition-colors",
+                    if(MapSet.member?(@selected_ids, session.id),
+                      do: "!bg-primary/10 outline outline-1 outline-primary/30",
+                      else: "hover"
+                    )
+                  ]}
+                >
+                  <td class="align-middle">
                     <button
                       phx-click="toggle_star"
                       phx-value-id={session.id}
                       class={[
-                        "text-lg flex-none transition-colors",
+                        "text-lg transition-colors",
                         if(session.starred,
                           do: "text-amber-400 hover:text-amber-300",
                           else: "text-base-content/20 hover:text-amber-400"
@@ -758,42 +884,48 @@ defmodule CopilotLvWeb.SessionLive.Index do
                       ]}
                       title={if session.starred, do: "Unstar", else: "Star"}
                     >
-                      <%= if session.starred do %>
-                        ★
-                      <% else %>
-                        ☆
-                      <% end %>
+                      {if session.starred, do: "★", else: "☆"}
                     </button>
-                    <.link navigate={~p"/session/#{session.id}"} class="min-w-0 flex-1 cursor-pointer">
+                  </td>
+                  <td class="align-middle max-w-xs">
+                    <.link navigate={~p"/session/#{session.id}"} class="cursor-pointer">
                       <div class="font-medium text-sm truncate">
                         {session.title || "Untitled session"}
                       </div>
-                      <div class="flex flex-wrap items-center gap-x-3 gap-y-0.5 mt-0.5 text-xs text-base-content/50">
-                        <%= if session.agent && session.agent != :copilot do %>
-                          <span class={[
-                            "badge badge-xs font-medium",
-                            agent_badge_class(session.agent)
-                          ]}>
-                            {session.agent}
-                          </span>
-                        <% end %>
-                        <%= if session.hostname do %>
-                          <span class="font-mono text-base-content/40">🖥 {session.hostname}</span>
-                        <% end %>
-                        <span class="font-mono">{shorten_path(session.cwd)}</span>
-                        <%= if session.model do %>
-                          <span class="badge badge-ghost badge-xs">{session.model}</span>
-                        <% end %>
-                        <%= if session.branch do %>
-                          <span>⎇ {session.branch}</span>
-                        <% end %>
-                        <%= if session.event_count && session.event_count > 0 do %>
-                          <span>{session.event_count} events</span>
-                        <% end %>
-                      </div>
+                      <%= if session.agent && session.agent != :copilot do %>
+                        <span class={[
+                          "badge badge-xs font-medium",
+                          agent_badge_class(session.agent)
+                        ]}>
+                          {session.agent}
+                        </span>
+                      <% end %>
                     </.link>
-                  </div>
-                  <div class="flex items-center gap-2">
+                  </td>
+                  <td class="align-middle text-xs text-base-content/50 font-mono whitespace-nowrap">
+                    <%= if session.hostname do %>
+                      {session.hostname}
+                    <% end %>
+                  </td>
+                  <td class="align-middle max-w-[200px]">
+                    <.link navigate={~p"/session/#{session.id}"} class="cursor-pointer">
+                      <span class="text-xs font-mono truncate block" title={session.cwd}>
+                        {shorten_path(session.cwd)}
+                      </span>
+                      <%= if session.branch do %>
+                        <span class="text-xs text-base-content/40">⎇ {session.branch}</span>
+                      <% end %>
+                    </.link>
+                  </td>
+                  <td class="align-middle text-right text-xs text-base-content/50 whitespace-nowrap">
+                    <%= if session.event_count && session.event_count > 0 do %>
+                      {format_number(session.event_count)}
+                    <% end %>
+                  </td>
+                  <td class="align-middle text-right text-xs text-base-content/40 whitespace-nowrap">
+                    {format_date(session.stopped_at || session.started_at)}
+                  </td>
+                  <td class="align-middle">
                     <%= unless session.starred do %>
                       <%= if @confirm_delete_id == session.id do %>
                         <div class="flex items-center gap-1">
@@ -822,14 +954,11 @@ defmodule CopilotLvWeb.SessionLive.Index do
                         </button>
                       <% end %>
                     <% end %>
-                    <div class="text-xs text-base-content/40 whitespace-nowrap">
-                      {format_date(session.started_at)}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          <% end %>
+                  </td>
+                </tr>
+              <% end %>
+            </tbody>
+          </table>
         </div>
 
         <%!-- Load More --%>
@@ -967,19 +1096,14 @@ defmodule CopilotLvWeb.SessionLive.Index do
   defp format_cost(m) when m < 1, do: "#{m}x"
   defp format_cost(m), do: "#{m}x"
 
+  defp format_number(nil), do: ""
+  defp format_number(0), do: ""
+  defp format_number(n) when is_integer(n), do: Integer.to_string(n)
+
   defp format_date(nil), do: ""
 
   defp format_date(dt) do
-    today = Date.utc_today()
-    date = DateTime.to_date(dt)
-
-    cond do
-      date == today -> Calendar.strftime(dt, "Today %H:%M")
-      date == Date.add(today, -1) -> Calendar.strftime(dt, "Yesterday %H:%M")
-      Date.diff(today, date) < 7 -> Calendar.strftime(dt, "%a %H:%M")
-      date.year == today.year -> Calendar.strftime(dt, "%b %d")
-      true -> Calendar.strftime(dt, "%b %d, %Y")
-    end
+    Calendar.strftime(dt, "%Y-%m-%d %H:%M:%S")
   end
 
   defp relative_time(nil), do: ""

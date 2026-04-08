@@ -18,6 +18,7 @@ defmodule CopilotLv.SessionRegistry do
     opts = Keyword.put(opts, :id, id)
     cwd = Keyword.get(opts, :cwd, File.cwd!())
     model = Keyword.get(opts, :model)
+    permissions = Keyword.get(opts, :permissions, %{})
 
     # Persist to DB
     Ash.create!(Session, %{id: id, cwd: cwd, model: model, agent: agent})
@@ -29,7 +30,12 @@ defmodule CopilotLv.SessionRegistry do
         CopilotLv.SessionServer
       end
 
-    child_opts = if agent in @harness_agents, do: Keyword.put(opts, :agent, agent), else: opts
+    child_opts =
+      if agent in @harness_agents do
+        opts |> Keyword.put(:agent, agent) |> Keyword.put(:permissions, permissions)
+      else
+        Keyword.put(opts, :permissions, permissions)
+      end
 
     case DynamicSupervisor.start_child(__MODULE__.Supervisor, {server_module, child_opts}) do
       {:ok, _pid} -> {:ok, id}
@@ -158,10 +164,17 @@ defmodule CopilotLv.SessionRegistry do
         # Update status in DB
         Ash.update!(session, %{status: :starting, stopped_at: nil}, action: :update_status)
 
+        permissions =
+          CopilotLv.AgentPermissions.from_params(
+            agent,
+            CopilotLv.AgentPermissions.defaults(agent)
+          )
+
         opts = [
           id: id,
           cwd: session.cwd,
-          model: session.model
+          model: session.model,
+          permissions: permissions
         ]
 
         server_module =

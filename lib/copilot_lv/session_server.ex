@@ -19,6 +19,7 @@ defmodule CopilotLv.SessionServer do
     :session_id,
     :model,
     :cwd,
+    permissions: %{},
     status: :starting,
     usage: [],
     event_count: 0,
@@ -86,6 +87,7 @@ defmodule CopilotLv.SessionServer do
     id = Keyword.fetch!(opts, :id)
     model = Keyword.get(opts, :model)
     cwd = Keyword.get(opts, :cwd, File.cwd!())
+    permissions = Keyword.get(opts, :permissions, %{})
     # Extract the raw provider ID for use with the Copilot CLI API
     provider_session_id = CopilotLv.Sessions.Session.provider_id(id)
 
@@ -93,6 +95,7 @@ defmodule CopilotLv.SessionServer do
       id: id,
       model: model,
       cwd: cwd,
+      permissions: permissions,
       session_id: provider_session_id
     }
 
@@ -101,9 +104,7 @@ defmodule CopilotLv.SessionServer do
 
   @impl true
   def handle_continue(:start_connection, state) do
-    cli_args =
-      ["--allow-all-tools", "--allow-all-paths", "--allow-all-urls"]
-      |> maybe_append("--model", state.model)
+    cli_args = build_copilot_cli_args(state)
 
     session_opts = %{
       model: state.model,
@@ -417,6 +418,21 @@ defmodule CopilotLv.SessionServer do
   def terminate(_reason, _state), do: :ok
 
   # ── Helpers ──
+
+  defp build_copilot_cli_args(state) do
+    perms = state.permissions
+
+    args = []
+
+    args =
+      if Map.get(perms, :allow_all_tools, true), do: args ++ ["--allow-all-tools"], else: args
+
+    args =
+      if Map.get(perms, :allow_all_paths, true), do: args ++ ["--allow-all-paths"], else: args
+
+    args = if Map.get(perms, :allow_all_urls, true), do: args ++ ["--allow-all-urls"], else: args
+    args |> maybe_append("--model", state.model)
+  end
 
   defp broadcast(state, message) do
     PubSub.broadcast(CopilotLv.PubSub, topic(state.id), message)

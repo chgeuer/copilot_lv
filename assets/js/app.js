@@ -31,6 +31,24 @@ import {
 } from "jido_tool_renderers/session_viewer_hooks"
 import {XtermSession} from "../vendor/xterm_hook"
 
+// ── CtrlClick hook for multi-select rows ──
+
+const CtrlClick = {
+  mounted() {
+    this.el.addEventListener("click", (e) => {
+      const row = e.target.closest("tr[data-select-id]")
+      if (!row) return
+      if (e.target.closest("a[href]") || e.target.closest("button")) return
+      e.preventDefault()
+      e.stopPropagation()
+      this.pushEvent("toggle_select", {
+        id: row.dataset.selectId,
+        ctrl: (e.ctrlKey || e.metaKey) ? "true" : "false"
+      })
+    })
+  }
+}
+
 // ── copilot_lv-specific: file link rewriting ──
 
 const LOCAL_FILE_LINK_RE = /^https?:\/\/localhost:\d+(\/\S+?\.\w{1,10})$/
@@ -79,7 +97,7 @@ const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks, AutoScroll, MarkdownContent, CopyMarkdown, UserMessage, ToolGroup, XtermSession},
+  hooks: {...colocatedHooks, AutoScroll, MarkdownContent, CopyMarkdown, UserMessage, ToolGroup, XtermSession, CtrlClick},
 })
 
 // Show progress bar on live navigation and form submits

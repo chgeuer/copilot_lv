@@ -301,7 +301,10 @@ defmodule CopilotLv.SessionWatcher do
 
     case SessionStoreImpl.upsert_session(jido_session) do
       {:ok, _} ->
-        import_events(prefixed_id, parsed.events)
+        # Normalize agent-native events into canonical vocabulary before storing.
+        # Copilot events are already canonical; other agents get transformed.
+        normalized = JidoSessions.EventNormalizer.normalize_events(agent_type, parsed.events)
+        import_events(prefixed_id, normalized)
         result
 
       {:error, _} ->
