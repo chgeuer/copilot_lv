@@ -103,6 +103,7 @@ defmodule CopilotLv.SessionStoreImpl do
           event_id: event[:event_id] || event[:id],
           parent_event_id: event[:parent_event_id] || event[:parentId],
           data: encode_data(event.data || %{}),
+          raw_data: encode_data(event[:raw_data]),
           timestamp: event.timestamp,
           sequence: event.sequence || 0,
           session_id: session_id
@@ -436,6 +437,7 @@ defmodule CopilotLv.SessionStoreImpl do
 
   defp apply_filters(sessions, [_ | rest]), do: apply_filters(sessions, rest)
 
+  defp encode_data(nil), do: nil
   defp encode_data(data) when is_binary(data), do: data
   defp encode_data(data) when is_map(data), do: Jason.encode!(data)
   defp encode_data(data), do: inspect(data)

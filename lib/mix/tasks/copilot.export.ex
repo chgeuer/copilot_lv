@@ -114,7 +114,9 @@ defmodule Mix.Tasks.Copilot.Export do
 
     lines =
       Enum.map(events, fn e ->
-        data = if is_binary(e.data), do: Jason.decode!(e.data), else: e.data
+        # Prefer raw_data (original JSONL line) for round-trip fidelity
+        source = e.raw_data || e.data
+        data = if is_binary(source), do: Jason.decode!(source), else: source
         Jason.encode!(data)
       end)
 
@@ -144,7 +146,8 @@ defmodule Mix.Tasks.Copilot.Export do
 
     lines =
       Enum.map(events, fn e ->
-        data = if is_binary(e.data), do: Jason.decode!(e.data), else: e.data
+        source = e.raw_data || e.data
+        data = if is_binary(source), do: Jason.decode!(source), else: source
         Jason.encode!(data)
       end)
 
@@ -175,7 +178,8 @@ defmodule Mix.Tasks.Copilot.Export do
     {envelope, message_events} =
       case events do
         [%{event_type: "session_meta"} = meta | rest] ->
-          meta_data = if is_binary(meta.data), do: Jason.decode!(meta.data), else: meta.data
+          source = meta.raw_data || meta.data
+          meta_data = if is_binary(source), do: Jason.decode!(source), else: source
           {meta_data, rest}
 
         _ ->
@@ -184,7 +188,8 @@ defmodule Mix.Tasks.Copilot.Export do
 
     messages =
       Enum.map(message_events, fn e ->
-        if is_binary(e.data), do: Jason.decode!(e.data), else: e.data
+        source = e.raw_data || e.data
+        if is_binary(source), do: Jason.decode!(source), else: source
       end)
 
     doc = Map.put(envelope, "messages", messages)
@@ -209,18 +214,24 @@ defmodule Mix.Tasks.Copilot.Export do
 
     lines =
       Enum.map(events, fn e ->
-        data = if is_binary(e.data), do: Jason.decode!(e.data), else: e.data
+        if e.raw_data do
+          # Use raw SSE event for round-trip fidelity
+          source = if is_binary(e.raw_data), do: Jason.decode!(e.raw_data), else: e.raw_data
+          Jason.encode!(source)
+        else
+          data = if is_binary(e.data), do: Jason.decode!(e.data), else: e.data
 
-        %{
-          "type" => e.event_type,
-          "id" => e.event_id,
-          "parentId" => e.parent_event_id,
-          "data" => data,
-          "timestamp" => if(e.timestamp, do: DateTime.to_iso8601(e.timestamp))
-        }
-        |> Enum.reject(fn {_k, v} -> is_nil(v) end)
-        |> Map.new()
-        |> Jason.encode!()
+          %{
+            "type" => e.event_type,
+            "id" => e.event_id,
+            "parentId" => e.parent_event_id,
+            "data" => data,
+            "timestamp" => if(e.timestamp, do: DateTime.to_iso8601(e.timestamp))
+          }
+          |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+          |> Map.new()
+          |> Jason.encode!()
+        end
       end)
 
     if verbose, do: Mix.shell().info("  #{session.agent} #{provider_id} → #{file}")

@@ -14,6 +14,7 @@ defmodule CopilotLv.Sessions.Event do
     attribute(:event_id, :string)
     attribute(:parent_event_id, :string)
     attribute(:data, :map, default: %{})
+    attribute(:raw_data, :map)
     attribute(:timestamp, :utc_datetime_usec, default: &DateTime.utc_now/0)
     attribute(:sequence, :integer, allow_nil?: false)
   end
@@ -36,6 +37,7 @@ defmodule CopilotLv.Sessions.Event do
         :event_id,
         :parent_event_id,
         :data,
+        :raw_data,
         :timestamp,
         :sequence,
         :session_id

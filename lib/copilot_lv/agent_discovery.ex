@@ -345,6 +345,7 @@ defmodule CopilotLv.AgentDiscovery do
         %{
           type: event.type,
           data: data,
+          raw_data: event[:raw_data] || data,
           timestamp: event.timestamp,
           sequence: event.sequence,
           event_id: data["id"],

@@ -467,6 +467,7 @@ defmodule CopilotLv.SessionServer do
     event_id = map_get(event, :id) || map_get(event, "id")
     event_type = map_get(event, :type) || map_get(event, "type")
     data = map_get(event, :data) || map_get(event, "data") || %{}
+    raw_data = map_get(event, :raw_data) || map_get(event, "raw_data")
     ts = map_get(event, :timestamp) || map_get(event, "timestamp")
 
     timestamp =
@@ -484,12 +485,16 @@ defmodule CopilotLv.SessionServer do
           DateTime.utc_now()
       end
 
+    # Preserve the full SSE event as raw_data for round-trip fidelity
+    raw_data = raw_data || sanitize_raw(event)
+
     try do
       Ash.create!(Event, %{
         session_id: state.id,
         event_type: event_type,
         event_id: event_id,
         data: data,
+        raw_data: raw_data,
         timestamp: timestamp,
         sequence: state.sequence
       })
@@ -497,6 +502,18 @@ defmodule CopilotLv.SessionServer do
       e -> Logger.warning("Failed to persist event: #{inspect(e)}")
     end
   end
+
+  defp sanitize_raw(event) when is_map(event) do
+    event
+    |> Map.drop([:__struct__])
+    |> Enum.reduce(%{}, fn
+      {k, %DateTime{} = dt}, acc -> Map.put(acc, to_string(k), DateTime.to_iso8601(dt))
+      {k, v}, acc when is_atom(k) -> Map.put(acc, to_string(k), v)
+      {k, v}, acc -> Map.put(acc, k, v)
+    end)
+  end
+
+  defp sanitize_raw(other), do: other
 
   defp persist_usage(state, entry) do
     try do

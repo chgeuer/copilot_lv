@@ -706,6 +706,7 @@ defmodule CopilotLv.Sync do
         %{
           type: event["type"] || "unknown",
           data: event["data"] || %{},
+          raw_data: event,
           timestamp: parse_timestamp(event["timestamp"]),
           sequence: seq,
           event_id: event["id"],
@@ -813,12 +814,13 @@ defmodule CopilotLv.Sync do
     # Find sessions with nil event_ids
     session_ids =
       repo.all(
-        from e in "events",
+        from(e in "events",
           join: s in "sessions",
           on: e.session_id == s.id,
           where: s.agent == "copilot" and is_nil(e.event_id),
           group_by: e.session_id,
           select: e.session_id
+        )
       )
 
     stats = %{repaired_sessions: 0, repaired_events: 0, skipped: 0}
@@ -843,7 +845,7 @@ defmodule CopilotLv.Sync do
 
           %{
             stats
-            | repaired_sessions: stats.repaired_sessions + (if count > 0, do: 1, else: 0),
+            | repaired_sessions: stats.repaired_sessions + if(count > 0, do: 1, else: 0),
               repaired_events: stats.repaired_events + count
           }
         else
@@ -888,7 +890,7 @@ defmodule CopilotLv.Sync do
         chunk
         |> Enum.map_join(" ", fn {seq, _eid, pid} ->
           if pid,
-            do: "WHEN #{seq} THEN '#{String.replace(pid, "'", "''")}'"  ,
+            do: "WHEN #{seq} THEN '#{String.replace(pid, "'", "''")}'",
             else: "WHEN #{seq} THEN NULL"
         end)
 

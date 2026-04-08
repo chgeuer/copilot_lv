@@ -62,11 +62,14 @@ defmodule Mix.Tasks.NormalizeEvents do
     total_inserted = 0
 
     {total_updated, total_deleted, total_inserted} =
-      Enum.reduce(sessions, {total_updated, total_deleted, total_inserted}, fn session, {upd, del, ins} ->
+      Enum.reduce(sessions, {total_updated, total_deleted, total_inserted}, fn session,
+                                                                               {upd, del, ins} ->
         normalize_session(session.id, agent, dry_run, {upd, del, ins})
       end)
 
-    Mix.shell().info("  Summary: #{total_updated} updated, #{total_deleted} deleted, #{total_inserted} inserted")
+    Mix.shell().info(
+      "  Summary: #{total_updated} updated, #{total_deleted} deleted, #{total_inserted} inserted"
+    )
   end
 
   defp normalize_session(session_id, agent, dry_run, {upd, del, ins}) do
@@ -83,6 +86,7 @@ defmodule Mix.Tasks.NormalizeEvents do
             id: e.id,
             event_type: e.event_type,
             data: e.data,
+            raw_data: e.raw_data,
             timestamp: e.timestamp,
             sequence: e.sequence
           }
@@ -102,7 +106,8 @@ defmodule Mix.Tasks.NormalizeEvents do
         # Already canonical
         {upd, del, ins}
       else
-        # Build raw events in the format the normalizer expects
+        # Build raw events in the format the normalizer expects.
+        # Inject _source_sequence so we can trace fan-out events back to their original.
         raw_events =
           Enum.map(events, fn e ->
             data = parse_data(e.data)
@@ -111,8 +116,15 @@ defmodule Mix.Tasks.NormalizeEvents do
               type: e.event_type,
               data: data,
               timestamp: parse_timestamp(e.timestamp),
-              sequence: e.sequence
+              sequence: e.sequence,
+              _source_sequence: e.sequence
             }
+          end)
+
+        # Build a lookup from sequence → raw_data (pre-normalization data for round-trip)
+        raw_data_by_seq =
+          Map.new(events, fn e ->
+            {e.sequence, e.raw_data || e.data}
           end)
 
         # Normalize
@@ -126,7 +138,8 @@ defmodule Mix.Tasks.NormalizeEvents do
             Mix.shell().info("  #{session_id}: #{length(events)} → #{length(normalized)} events")
 
             # Show type changes
-            all_types = MapSet.union(MapSet.new(Map.keys(old_types)), MapSet.new(Map.keys(new_types)))
+            all_types =
+              MapSet.union(MapSet.new(Map.keys(old_types)), MapSet.new(Map.keys(new_types)))
 
             Enum.each(Enum.sort(all_types), fn t ->
               old = Map.get(old_types, t, 0)
@@ -147,12 +160,17 @@ defmodule Mix.Tasks.NormalizeEvents do
 
           entries =
             Enum.map(normalized, fn event ->
+              # Look up raw_data from the source event (before fan-out/normalization)
+              source_seq = Map.get(event, :_source_sequence, event.sequence)
+              raw_data = Map.get(raw_data_by_seq, source_seq)
+
               %{
                 id: Ash.UUIDv7.generate(),
                 event_type: event.type,
                 event_id: nil,
                 parent_event_id: nil,
                 data: encode_data(event.data),
+                raw_data: encode_data(raw_data),
                 timestamp: event.timestamp,
                 sequence: event.sequence,
                 session_id: session_id

@@ -173,11 +173,14 @@ defmodule CopilotLv.HarnessSessionServer do
     else
       state = %{state | event_count: state.event_count + 1, sequence: state.sequence + 1}
 
-      # Build event map in copilot format
+      # Build event map in copilot format, preserving raw adapter event for round-trip
+      raw_data = sanitize_raw_event(event)
+
       event_map = %{
         id: (event.raw && Map.get(event.raw, :id)) || "ev-#{System.unique_integer([:positive])}",
         type: type,
         data: data,
+        raw_data: raw_data,
         timestamp: event.timestamp || DateTime.utc_now() |> DateTime.to_iso8601()
       }
 
@@ -371,10 +374,13 @@ defmodule CopilotLv.HarnessSessionServer do
     {type, data} = translate_event(event)
     state = %{state | event_count: state.event_count + 1, sequence: state.sequence + 1}
 
+    raw_data = sanitize_raw_event(event)
+
     event_map = %{
       id: (event.raw && Map.get(event.raw, :id)) || "ev-#{System.unique_integer([:positive])}",
       type: type,
       data: data,
+      raw_data: raw_data,
       timestamp: event.timestamp || DateTime.utc_now() |> DateTime.to_iso8601()
     }
 
@@ -564,6 +570,7 @@ defmodule CopilotLv.HarnessSessionServer do
     event_id = event[:id] || event["id"]
     event_type = event[:type] || event["type"]
     data = event[:data] || event["data"] || %{}
+    raw_data = event[:raw_data] || event["raw_data"]
     timestamp = normalize_datetime(event[:timestamp] || event["timestamp"])
 
     try do
@@ -572,6 +579,7 @@ defmodule CopilotLv.HarnessSessionServer do
         event_type: event_type,
         event_id: event_id,
         data: data,
+        raw_data: raw_data,
         timestamp: timestamp,
         sequence: state.sequence
       })
@@ -579,6 +587,35 @@ defmodule CopilotLv.HarnessSessionServer do
       e ->
         Logger.warning("Failed to persist event: #{Exception.message(e)}")
     end
+  end
+
+  defp sanitize_raw_event(%Jido.Harness.Event{} = event) do
+    raw = event.raw
+
+    cond do
+      is_map(raw) && Map.has_key?(raw, :__struct__) ->
+        Map.from_struct(raw) |> sanitize_values()
+
+      is_map(raw) ->
+        sanitize_values(raw)
+
+      true ->
+        %{
+          "type" => to_string(event.type),
+          "provider" => event.provider && to_string(event.provider),
+          "session_id" => event.session_id,
+          "timestamp" => event.timestamp,
+          "payload" => event.payload
+        }
+    end
+  end
+
+  defp sanitize_values(map) when is_map(map) do
+    Enum.reduce(map, %{}, fn
+      {k, %DateTime{} = dt}, acc -> Map.put(acc, to_string(k), DateTime.to_iso8601(dt))
+      {k, v}, acc when is_atom(k) -> Map.put(acc, to_string(k), v)
+      {k, v}, acc -> Map.put(acc, k, v)
+    end)
   end
 
   defp persist_usage(state, entry) do
