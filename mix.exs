@@ -94,9 +94,9 @@ defmodule CopilotLv.MixProject do
       {:jido_pi, jido_dep("jido_pi")},
       {:jido_tool_renderers, jido_dep("jido_tool_renderers")},
       {:jido_sessions, jido_dep("jido_sessions")},
-      {:jido_claude, agentjido_dep("jido_claude", branch: "feat/thinking-and-cache-usage")},
-      {:jido_codex, agentjido_dep("jido_codex", branch: "feat/usage-enrichment")},
-      {:jido_gemini, agentjido_dep("jido_gemini", branch: "feat/usage-enrichment")},
+      {:jido_claude, agentjido_dep("jido_claude", branch: "clean-history")},
+      {:jido_codex, agentjido_dep("jido_codex", branch: "clean-history")},
+      {:jido_gemini, agentjido_dep("jido_gemini", branch: "clean-history")},
       # Overrides for transitive deps not yet on hex or needing version alignment
       {:jido, "~> 2.1", override: true},
       {:jido_action, "~> 2.1", override: true},
@@ -104,7 +104,7 @@ defmodule CopilotLv.MixProject do
       {:libgraph, "~> 0.16.1-mg.1", hex: :multigraph, override: true},
       {:jido_shell, agentjido_dep("jido_shell") ++ [override: true]},
       {:jido_harness,
-       agentjido_dep("jido_harness", branch: "fix/update-sprite-lifecycle-alias") ++
+       agentjido_dep("jido_harness", branch: "clean-history") ++
          [override: true]},
       {:jido_vfs,
        agentjido_dep("jido_vfs", branch: "fix/pin-chunk-size-in-bitstring-match") ++
