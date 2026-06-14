@@ -31,8 +31,9 @@ defmodule CopilotLv.Application do
     # Initialize ETS table for Claude ask_user MCP tool context
     CopilotLv.AskUser.ClaudeTool.init_context_table()
 
-    # Register session-history models after Repo is started
-    register_session_models()
+    # Build the per-agent model catalog (curated + session-history models) after
+    # the Repo is started, so the model selectors include every used model.
+    CopilotLv.ModelCatalog.refresh()
 
     result
   end
@@ -43,17 +44,6 @@ defmodule CopilotLv.Application do
     else
       []
     end
-  end
-
-  defp register_session_models do
-    model_ids =
-      CopilotLv.Sessions.Session
-      |> Ash.read!()
-      |> Enum.map(& &1.model)
-
-    Jido.GHCopilot.Models.register_session_models(model_ids)
-  rescue
-    _ -> :ok
   end
 
   # Tell Phoenix to update the endpoint configuration
