@@ -21,7 +21,7 @@ case "${1:-help}" in
     # Wait for the node to boot and be connectable
     for i in $(seq 1 30); do
       if elixir --sname "probe_$$" --cookie "$COOKIE" --hidden -e "
-        if Node.connect(:\"${FQDN}\"), do: System.halt(0), else: System.halt(1)
+        if Node.connect(:\"${FQDN}\"), do: System.stop(0), else: System.stop(1)
       " 2>/dev/null; then
         echo "Node ${FQDN} is up (pid $(cat "$PIDFILE"))"
         exit 0
@@ -56,7 +56,7 @@ case "${1:-help}" in
     echo "Waiting for node ${FQDN} ..."
     for i in $(seq 1 "$TIMEOUT"); do
       if elixir --sname "probe_$$" --cookie "$COOKIE" --hidden -e "
-        if Node.connect(:\"${FQDN}\"), do: System.halt(0), else: System.halt(1)
+        if Node.connect(:\"${FQDN}\"), do: System.stop(0), else: System.stop(1)
       " 2>/dev/null; then
         echo "Node ${FQDN} is reachable"
         exit 0
@@ -77,7 +77,7 @@ case "${1:-help}" in
         ${EXPR}
       \"\"\"])
       IO.inspect(result, pretty: true, limit: 200, printable_limit: 4096)
-      System.halt(0)
+      System.stop(0)
     "
     ;;
 
@@ -90,7 +90,7 @@ case "${1:-help}" in
       code = File.read!(\"${FILE}\")
       {result, _binding} = :rpc.call(target, Code, :eval_string, [code])
       IO.inspect(result, pretty: true, limit: 200, printable_limit: 4096)
-      System.halt(0)
+      System.stop(0)
     "
     ;;
 
