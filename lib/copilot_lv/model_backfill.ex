@@ -52,6 +52,7 @@ defmodule CopilotLv.ModelBackfill do
     case CopilotLv.Repo.query(@backfill_sql, []) do
       {:ok, %{num_rows: updated}} ->
         Logger.info("CopilotLv.ModelBackfill: populated model for #{updated} session(s)")
+        CopilotLv.ModelCatalog.invalidate()
         {:ok, updated}
 
       {:error, reason} = error ->

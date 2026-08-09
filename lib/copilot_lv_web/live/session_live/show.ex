@@ -90,6 +90,12 @@ defmodule CopilotLvWeb.SessionLive.Show do
           SessionArtifact
           |> Ash.Query.for_read(:for_session, %{session_id: id})
           |> Ash.read!()
+          |> Kernel.++(
+            CopilotLv.SessionStoreImpl.get_project_documents(
+              db_session.agent || :copilot,
+              db_session.cwd
+            )
+          )
           |> sort_artifacts()
 
         # All events in the database use the canonical copilot vocabulary,
@@ -1071,6 +1077,7 @@ defmodule CopilotLvWeb.SessionLive.Show do
       assigns
       |> assign(:checkpoint_count, length(assigns.checkpoints))
       |> assign(:artifact_count, length(assigns.artifacts))
+      |> assign(:artifact_groups, group_artifacts(assigns.artifacts))
       |> assign(
         :selected_checkpoint,
         select_item(assigns.checkpoints, assigns.selected_checkpoint_id)
@@ -1213,38 +1220,50 @@ defmodule CopilotLvWeb.SessionLive.Show do
               </div>
             <% else %>
               <div id="artifact-list" class="space-y-2">
-                <%= for artifact <- @artifacts do %>
-                  <button
-                    id={"artifact-#{artifact.id}"}
-                    phx-click="select_artifact"
-                    phx-value-id={artifact.id}
-                    class={[
-                      "w-full rounded-2xl border px-3 py-3 text-left transition-all duration-150",
-                      if(@selected_artifact_id == artifact.id,
-                        do: "border-primary bg-primary/10 shadow-sm",
-                        else:
-                          "border-base-300 bg-base-100 hover:border-primary/40 hover:bg-base-200/70"
-                      )
-                    ]}
-                  >
-                    <div class="flex items-start justify-between gap-3">
-                      <div class="min-w-0">
-                        <div class="truncate font-mono text-[0.78rem] text-base-content/70">
-                          {artifact.path}
-                        </div>
-                        <div class="mt-1 text-sm font-semibold text-base-content">
-                          {artifact_type_label(artifact.artifact_type)}
-                        </div>
-                      </div>
-                      <span class="badge badge-outline badge-xs whitespace-nowrap">
-                        {format_bytes(artifact.size || 0)}
-                      </span>
+                <%= for {group, artifacts} <- @artifact_groups do %>
+                  <section id={"artifact-group-#{group}"} class="space-y-2">
+                    <div class="px-2 pt-2 text-[0.65rem] font-semibold uppercase tracking-[0.2em] text-base-content/40">
+                      {artifact_group_label(group)}
                     </div>
+                    <%= for artifact <- artifacts do %>
+                      <button
+                        id={"artifact-#{artifact.id}"}
+                        phx-click="select_artifact"
+                        phx-value-id={artifact.id}
+                        class={[
+                          "w-full rounded-2xl border px-3 py-3 text-left transition-all duration-150",
+                          if(@selected_artifact_id == artifact.id,
+                            do: "border-primary bg-primary/10 shadow-sm",
+                            else:
+                              "border-base-300 bg-base-100 hover:border-primary/40 hover:bg-base-200/70"
+                          )
+                        ]}
+                      >
+                        <div class="flex items-start justify-between gap-3">
+                          <div class="min-w-0">
+                            <div class="truncate font-mono text-[0.78rem] text-base-content/70">
+                              {artifact.path}
+                            </div>
+                            <div class="mt-1 text-sm font-semibold text-base-content">
+                              {artifact_type_label(artifact.artifact_type)}
+                            </div>
+                          </div>
+                          <div class="flex shrink-0 items-center gap-1">
+                            <%= if artifact.truncated do %>
+                              <span class="badge badge-warning badge-xs">preview</span>
+                            <% end %>
+                            <span class="badge badge-outline badge-xs whitespace-nowrap">
+                              {format_bytes(artifact.original_size || artifact.size || 0)}
+                            </span>
+                          </div>
+                        </div>
 
-                    <div class="mt-2 text-xs leading-relaxed text-base-content/65">
-                      {preview_text(artifact.content, 180)}
-                    </div>
-                  </button>
+                        <div class="mt-2 text-xs leading-relaxed text-base-content/65">
+                          {preview_text(artifact.content, 180)}
+                        </div>
+                      </button>
+                    <% end %>
+                  </section>
                 <% end %>
               </div>
             <% end %>
@@ -1386,12 +1405,29 @@ defmodule CopilotLvWeb.SessionLive.Show do
               <span class="badge badge-outline badge-sm">
                 {artifact_type_label(@artifact.artifact_type)}
               </span>
-              <span class="badge badge-ghost badge-sm">{format_bytes(@artifact.size || 0)}</span>
+              <%= if @artifact.truncated do %>
+                <span class="badge badge-warning badge-sm">Truncated preview</span>
+              <% end %>
+              <span class="badge badge-ghost badge-sm">
+                {format_bytes(@artifact.original_size || @artifact.size || 0)}
+              </span>
             </div>
           </div>
+          <%= if @artifact.source_path do %>
+            <p class="mt-3 break-all font-mono text-xs text-base-content/50">
+              Source: {@artifact.source_path}
+            </p>
+          <% end %>
         </div>
 
         <div class="flex-1 space-y-2 overflow-y-auto px-4 py-4">
+          <%= if @artifact.truncated do %>
+            <div class="alert alert-warning py-2 text-xs">
+              Only a bounded head/tail preview is stored. Original size: {format_bytes(
+                @artifact.original_size || 0
+              )}.
+            </div>
+          <% end %>
           <h4 class="text-sm font-semibold text-base-content">Stored content</h4>
           <%= if String.ends_with?(@artifact.path || "", ".md") do %>
             <.markdown_content
@@ -1878,8 +1914,25 @@ defmodule CopilotLvWeb.SessionLive.Show do
         path: artifact.path,
         content: artifact.content || "",
         content_hash: artifact.content_hash,
-        size: artifact.size || 0,
-        artifact_type: artifact.artifact_type
+        size: Map.get(artifact, :size) || Map.get(artifact, :original_size) || 0,
+        artifact_type:
+          Map.get(artifact, :artifact_type) ||
+            if(match?(%CopilotLv.Sessions.ProjectDocument{}, artifact),
+              do: :project_document,
+              else: :file
+            ),
+        category:
+          Map.get(artifact, :category) ||
+            if(match?(%CopilotLv.Sessions.ProjectDocument{}, artifact),
+              do: :project_memory,
+              else: legacy_artifact_category(artifact)
+            ),
+        source_path: Map.get(artifact, :source_path),
+        mime_type: Map.get(artifact, :mime_type),
+        modified_at: Map.get(artifact, :modified_at),
+        original_size: Map.get(artifact, :original_size) || Map.get(artifact, :size) || 0,
+        stored_size: Map.get(artifact, :stored_size) || byte_size(artifact.content || ""),
+        truncated: Map.get(artifact, :truncated, false)
       }
     end)
     |> Enum.sort_by(&artifact_sort_key/1)
@@ -1887,16 +1940,31 @@ defmodule CopilotLvWeb.SessionLive.Show do
 
   defp artifact_sort_key(artifact) do
     rank =
-      case artifact.artifact_type do
-        :plan -> 0
-        :workspace -> 1
-        :file -> 2
-        :session_db_dump -> 3
-        :codex_thread_meta -> 4
-        _ -> 5
+      case artifact.category do
+        :authored_document -> 0
+        :project_memory -> 1
+        :tool_output -> 2
+        :metadata -> 3
+        _ -> 4
       end
 
-    {rank, artifact.path || ""}
+    type_rank = if Map.get(artifact, :artifact_type) == :plan, do: 0, else: 1
+    {rank, type_rank, artifact.path || ""}
+  end
+
+  defp legacy_artifact_category(artifact) do
+    case Map.get(artifact, :artifact_type) do
+      type when type in [:plan, :file] -> :authored_document
+      _ -> :metadata
+    end
+  end
+
+  defp group_artifacts(artifacts) do
+    artifacts
+    |> Enum.group_by(& &1.category)
+    |> Enum.sort_by(fn {category, _} ->
+      artifact_sort_key(%{category: category, path: ""})
+    end)
   end
 
   defp default_inspector_tab(checkpoints, _artifacts) when checkpoints != [], do: :checkpoints
@@ -1944,9 +2012,16 @@ defmodule CopilotLvWeb.SessionLive.Show do
   defp artifact_type_label(:file), do: "Session file"
   defp artifact_type_label(:session_db_dump), do: "Session DB dump"
   defp artifact_type_label(:codex_thread_meta), do: "Codex thread metadata"
+  defp artifact_type_label(:project_document), do: "Project memory"
 
   defp artifact_type_label(other),
     do: other |> to_string() |> String.replace("_", " ") |> String.capitalize()
+
+  defp artifact_group_label(:authored_document), do: "Authored documents"
+  defp artifact_group_label(:project_memory), do: "Project memory"
+  defp artifact_group_label(:tool_output), do: "Tool output"
+  defp artifact_group_label(:metadata), do: "Metadata"
+  defp artifact_group_label(_), do: "Other"
 
   defp status_badge(:idle), do: "badge-success"
   defp status_badge(:thinking), do: "badge-warning"

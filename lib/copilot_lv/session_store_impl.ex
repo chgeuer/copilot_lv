@@ -15,6 +15,7 @@ defmodule CopilotLv.SessionStoreImpl do
     Event,
     Checkpoint,
     SessionArtifact,
+    ProjectDocument,
     SessionTodo,
     UsageEntry
   }
@@ -26,22 +27,29 @@ defmodule CopilotLv.SessionStoreImpl do
     attrs = session_to_attrs(session)
     prefixed_id = attrs.id
 
-    case Ash.get(Session, prefixed_id) do
-      {:ok, existing} ->
-        existing
-        |> Ash.Changeset.for_update(
-          :update_import,
-          Map.drop(attrs, [:id, :cwd, :agent, :config_dir])
-        )
-        |> Ash.update()
-        |> wrap_session()
+    result =
+      case Ash.get(Session, prefixed_id) do
+        {:ok, existing} ->
+          existing
+          |> Ash.Changeset.for_update(
+            :update_import,
+            Map.drop(attrs, [:id, :cwd, :agent, :config_dir])
+          )
+          |> Ash.update()
+          |> wrap_session()
 
-      {:error, _} ->
-        Session
-        |> Ash.Changeset.for_create(:import, attrs)
-        |> Ash.create()
-        |> wrap_session()
+        {:error, _} ->
+          Session
+          |> Ash.Changeset.for_create(:import, attrs)
+          |> Ash.create()
+          |> wrap_session()
+      end
+
+    if match?({:ok, _}, result) do
+      CopilotLv.ModelCatalog.observe_model(attrs.agent, attrs.model)
     end
+
+    result
   end
 
   @impl true
@@ -76,6 +84,7 @@ defmodule CopilotLv.SessionStoreImpl do
         end
 
         Ash.destroy!(session)
+        CopilotLv.ModelCatalog.invalidate()
         :ok
 
       {:error, _} ->
@@ -124,7 +133,14 @@ defmodule CopilotLv.SessionStoreImpl do
         acc + inserted
       end)
 
-    if count > 0, do: refresh_event_count(session_id)
+    if count > 0 do
+      refresh_event_count(session_id)
+
+      case CopilotLv.Sessions.Session.agent_from_id(session_id) do
+        nil -> :ok
+        agent -> CopilotLv.ModelCatalog.observe_event_models(agent, events)
+      end
+    end
 
     {:ok, count}
   end
@@ -171,25 +187,130 @@ defmodule CopilotLv.SessionStoreImpl do
 
   @impl true
   def upsert_artifacts(session_id, artifacts) do
-    Enum.each(artifacts, fn art ->
+    Enum.reduce_while(artifacts, :ok, fn art, :ok ->
+      content = artifact_value(art, :content, "")
+
       changeset =
         SessionArtifact
         |> Ash.Changeset.for_create(:upsert, %{
           session_id: session_id,
-          path: art.path,
-          content: art.content,
-          content_hash: art.content_hash || content_hash(art.content),
-          size: art.size || byte_size(art.content || ""),
-          artifact_type: art.artifact_type
+          path: artifact_value(art, :path),
+          content: content,
+          content_hash: artifact_value(art, :content_hash) || content_hash(content),
+          size: artifact_value(art, :size, byte_size(content)),
+          artifact_type: artifact_value(art, :artifact_type, :file),
+          category: artifact_value(art, :category),
+          source_agent: artifact_value(art, :source_agent),
+          source_path: artifact_value(art, :source_path),
+          mime_type: artifact_value(art, :mime_type),
+          modified_at: artifact_value(art, :modified_at),
+          original_size: artifact_value(art, :original_size),
+          stored_size: artifact_value(art, :stored_size),
+          truncated: artifact_value(art, :truncated, false),
+          managed: artifact_value(art, :managed, false)
         })
 
       case Ash.create(changeset) do
-        {:ok, _} -> :ok
-        {:error, _} -> :ok
+        {:ok, _} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
+  end
 
-    :ok
+  @doc "Upserts a scanner manifest and removes managed artifacts no longer present at the source."
+  def reconcile_artifacts(session_id, agent, artifacts) do
+    with :ok <- upsert_artifacts(session_id, artifacts) do
+      retained_paths = MapSet.new(artifacts, &artifact_value(&1, :path))
+
+      removable =
+        SessionArtifact
+        |> Ash.Query.for_read(:for_session, %{session_id: session_id})
+        |> Ash.read!()
+        |> Enum.filter(fn artifact ->
+          (artifact.managed and artifact.source_agent == agent) or
+            (is_nil(artifact.source_agent) and
+               artifact.artifact_type in [:file, :plan, :workspace])
+        end)
+        |> Enum.reject(&MapSet.member?(retained_paths, &1.path))
+
+      Enum.each(removable, &Ash.destroy!/1)
+      %{stored: length(artifacts), removed: length(removable)}
+    end
+  end
+
+  @doc "Compares a scanner manifest with managed artifacts currently stored for a session."
+  def artifact_diff(session_id, agent, artifacts) do
+    existing =
+      SessionArtifact
+      |> Ash.Query.for_read(:for_session, %{session_id: session_id})
+      |> Ash.read!()
+      |> Enum.filter(fn artifact ->
+        (artifact.managed and artifact.source_agent == agent) or
+          (is_nil(artifact.source_agent) and
+             artifact.artifact_type in [:file, :plan, :workspace])
+      end)
+      |> Map.new(&{&1.path, &1.content_hash})
+
+    incoming = Map.new(artifacts, &{artifact_value(&1, :path), artifact_value(&1, :content_hash)})
+
+    Enum.reduce(incoming, %{added: 0, updated: 0, unchanged: 0}, fn {path, hash}, counts ->
+      case Map.fetch(existing, path) do
+        :error -> Map.update!(counts, :added, &(&1 + 1))
+        {:ok, ^hash} -> Map.update!(counts, :unchanged, &(&1 + 1))
+        {:ok, _old_hash} -> Map.update!(counts, :updated, &(&1 + 1))
+      end
+    end)
+    |> Map.put(:removed, map_size(existing) - map_size(Map.take(existing, Map.keys(incoming))))
+  end
+
+  @doc "Upserts and reconciles project-level documents for an agent/project pair."
+  def reconcile_project_documents(agent, project_key, documents) do
+    upsert_result =
+      Enum.reduce_while(documents, :ok, fn document, :ok ->
+        content = artifact_value(document, :content, "")
+
+        result =
+          ProjectDocument
+          |> Ash.Changeset.for_create(:upsert, %{
+            agent: agent,
+            project_key: project_key,
+            path: artifact_value(document, :path),
+            source_path: artifact_value(document, :source_path),
+            content: content,
+            content_hash: artifact_value(document, :content_hash) || content_hash(content),
+            mime_type: artifact_value(document, :mime_type),
+            modified_at: artifact_value(document, :modified_at),
+            original_size: artifact_value(document, :original_size, byte_size(content)),
+            stored_size: artifact_value(document, :stored_size, byte_size(content)),
+            truncated: artifact_value(document, :truncated, false)
+          })
+          |> Ash.create()
+
+        case result do
+          {:ok, _} -> {:cont, :ok}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
+
+    with :ok <- upsert_result do
+      retained_paths = MapSet.new(documents, &artifact_value(&1, :path))
+
+      removable =
+        ProjectDocument
+        |> Ash.Query.for_read(:for_project, %{agent: agent, project_key: project_key})
+        |> Ash.read!()
+        |> Enum.reject(&MapSet.member?(retained_paths, &1.path))
+
+      Enum.each(removable, &Ash.destroy!/1)
+      %{stored: length(documents), removed: length(removable)}
+    end
+  end
+
+  @doc "Returns project documents associated with an agent/project key."
+  def get_project_documents(agent, project_key) do
+    ProjectDocument
+    |> Ash.Query.for_read(:for_project, %{agent: agent, project_key: project_key})
+    |> Ash.read!()
   end
 
   @impl true
@@ -446,6 +567,13 @@ defmodule CopilotLv.SessionStoreImpl do
 
   defp content_hash(content) do
     :crypto.hash(:sha256, content) |> Base.encode16(case: :lower)
+  end
+
+  defp artifact_value(artifact, key, default \\ nil) do
+    case Map.get(artifact, key) do
+      nil -> default
+      value -> value
+    end
   end
 
   defp parse_status("pending"), do: :pending

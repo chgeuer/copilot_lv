@@ -68,7 +68,7 @@ defmodule CopilotLv.AgentDiscovery do
 
     existing = load_existing_sessions()
 
-    stats = %{imported: 0, repaired: 0, skipped: 0, errors: 0}
+    stats = initial_stats()
 
     Enum.reduce(discovered, stats, fn {agent_type, session_id, path, config_dir}, stats ->
       prefixed = CopilotLv.Sessions.Session.prefixed_id(agent_type, session_id)
@@ -115,7 +115,7 @@ defmodule CopilotLv.AgentDiscovery do
     existing = load_existing_sessions()
     force = Keyword.get(opts, :force, false)
 
-    stats = %{imported: 0, repaired: 0, skipped: 0, errors: 0}
+    stats = initial_stats()
 
     Enum.reduce(discovered, stats, fn {agent_type, session_id, remote_path, config_dir}, stats ->
       prefixed = CopilotLv.Sessions.Session.prefixed_id(agent_type, session_id)
@@ -181,6 +181,8 @@ defmodule CopilotLv.AgentDiscovery do
   defp import_new(agent_type, session_id, path, config_dir, hostname, dry_run, verbose, stats) do
     case CopilotLv.Agents.parse_session(agent_type, path) do
       {:ok, parsed} ->
+        stats = collect_artifact_stats(stats, agent_type, nil, session_id, parsed.cwd, path)
+
         if dry_run do
           if verbose, do: Logger.info("Would import #{agent_type}/#{session_id}")
           %{stats | imported: stats.imported + 1}
@@ -213,6 +215,16 @@ defmodule CopilotLv.AgentDiscovery do
        ) do
     case CopilotLv.Agents.parse_session(agent_type, path) do
       {:ok, parsed} ->
+        stats =
+          collect_artifact_stats(
+            stats,
+            agent_type,
+            existing_session.id,
+            CopilotLv.Sessions.Session.provider_id(existing_session.id),
+            parsed.cwd || existing_session.cwd,
+            path
+          )
+
         source_count = length(parsed.events)
         db_count = SessionStoreImpl.event_count(existing_session.id)
         has_new_events = source_count > db_count
@@ -256,10 +268,11 @@ defmodule CopilotLv.AgentDiscovery do
             %{stats | repaired: stats.repaired + 1}
           end
         else
-          # Still store thread meta artifacts for skipped codex sessions (idempotent upsert)
+          # Artifacts can change without any new conversation events.
           unless dry_run do
             provider_id = CopilotLv.Sessions.Session.provider_id(existing_session.id)
             store_codex_thread_meta(agent_type, provider_id, existing_session.id)
+            sync_agent_artifacts(agent_type, existing_session.id, existing_session.cwd, path)
           end
 
           %{stats | skipped: stats.skipped + 1}
@@ -286,7 +299,12 @@ defmodule CopilotLv.AgentDiscovery do
     store_codex_thread_meta(agent_type, provider_id, existing_session.id)
 
     # Import files from agent session directory (tool-results, etc.)
-    import_agent_artifacts(agent_type, existing_session.id, source_path)
+    sync_agent_artifacts(
+      agent_type,
+      existing_session.id,
+      parsed.cwd || existing_session.cwd,
+      source_path
+    )
 
     # Update session metadata via SessionStoreImpl
     updated_session = %JidoSessions.Session{
@@ -305,7 +323,7 @@ defmodule CopilotLv.AgentDiscovery do
     SessionStoreImpl.upsert_session(updated_session)
   end
 
-  defp do_import(parsed, agent_type, hostname, _config_dir, source_path \\ nil) do
+  defp do_import(parsed, agent_type, hostname, _config_dir, source_path) do
     id = CopilotLv.Sessions.Session.prefixed_id(agent_type, parsed.session_id)
 
     jido_session = %JidoSessions.Session{
@@ -329,8 +347,11 @@ defmodule CopilotLv.AgentDiscovery do
       {:ok, session} ->
         import_events(session.id, parsed.events)
         store_codex_thread_meta(agent_type, parsed.session_id, session.id)
-        import_agent_artifacts(agent_type, session.id, source_path)
-        {:ok, session}
+
+        case sync_agent_artifacts(agent_type, session.id, session.cwd, source_path) do
+          :ok -> {:ok, session}
+          {:error, reason} -> {:error, reason}
+        end
 
       {:error, reason} ->
         {:error, reason}
@@ -386,29 +407,102 @@ defmodule CopilotLv.AgentDiscovery do
 
   defp store_codex_thread_meta(_agent_type, _provider_id, _session_id), do: :ok
 
-  defp import_agent_artifacts(_agent_type, _session_id, nil), do: :ok
+  defp sync_agent_artifacts(_agent_type, _session_id, _project_key, nil), do: :ok
 
-  defp import_agent_artifacts(agent_type, session_id, source_path) do
-    artifacts = CopilotLv.Sync.read_artifacts_for_agent(agent_type, source_path)
+  defp sync_agent_artifacts(agent_type, session_id, project_key, source_path) do
+    provider_id = CopilotLv.Sessions.Session.provider_id(session_id)
+    report = CopilotLv.ArtifactScanner.scan_session(agent_type, provider_id, source_path)
 
-    unless Enum.empty?(artifacts) do
-      art_structs =
-        Enum.map(artifacts, fn art ->
-          %JidoSessions.Artifact{
-            path: art.path,
-            artifact_type: art.artifact_type,
-            content: art.content,
-            content_hash: art.content_hash,
-            size: art.size
-          }
-        end)
+    session_result =
+      SessionStoreImpl.reconcile_artifacts(session_id, agent_type, report.artifacts)
 
-      SessionStoreImpl.upsert_artifacts(session_id, art_structs)
+    project_result =
+      if is_binary(project_key) and project_key != "" and project_key != "unknown" do
+        project_report =
+          CopilotLv.ArtifactScanner.scan_project_documents(agent_type, project_key, source_path)
+
+        SessionStoreImpl.reconcile_project_documents(
+          agent_type,
+          project_key,
+          project_report.artifacts
+        )
+      else
+        %{stored: 0, removed: 0}
+      end
+
+    case {session_result, project_result} do
+      {%{}, %{}} ->
+        :ok
+
+      {{:error, reason}, _} ->
+        Logger.warning("Artifact reconciliation failed for #{session_id}: #{inspect(reason)}")
+        {:error, reason}
+
+      {_, {:error, reason}} ->
+        Logger.warning(
+          "Project document reconciliation failed for #{project_key}: #{inspect(reason)}"
+        )
+
+        {:error, reason}
     end
-
-    :ok
   rescue
-    _ -> :ok
+    error ->
+      Logger.warning("Artifact scan failed for #{session_id}: #{Exception.message(error)}")
+      {:error, error}
+  end
+
+  defp collect_artifact_stats(
+         stats,
+         agent_type,
+         db_session_id,
+         provider_id,
+         project_key,
+         source_path
+       ) do
+    report = CopilotLv.ArtifactScanner.scan_session(agent_type, provider_id, source_path)
+
+    diff =
+      if db_session_id do
+        SessionStoreImpl.artifact_diff(db_session_id, agent_type, report.artifacts)
+      else
+        %{added: length(report.artifacts), updated: 0, unchanged: 0, removed: 0}
+      end
+
+    project_report =
+      if is_binary(project_key) and project_key not in ["", "unknown"] do
+        CopilotLv.ArtifactScanner.scan_project_documents(agent_type, project_key, source_path)
+      else
+        %{artifacts: [], excluded: %{}}
+      end
+
+    stats
+    |> Map.update!(:artifact_candidates, &(&1 + length(report.artifacts)))
+    |> Map.update!(:artifact_added, &(&1 + diff.added))
+    |> Map.update!(:artifact_updated, &(&1 + diff.updated))
+    |> Map.update!(:artifact_removed, &(&1 + diff.removed))
+    |> Map.update!(:artifact_truncated, fn count ->
+      count + Enum.count(report.artifacts, & &1.truncated)
+    end)
+    |> Map.update!(:artifact_excluded, fn count ->
+      count + Enum.sum(Map.values(report.excluded))
+    end)
+    |> Map.update!(:project_documents, &(&1 + length(project_report.artifacts)))
+  end
+
+  defp initial_stats do
+    %{
+      imported: 0,
+      repaired: 0,
+      skipped: 0,
+      errors: 0,
+      artifact_candidates: 0,
+      artifact_added: 0,
+      artifact_updated: 0,
+      artifact_removed: 0,
+      artifact_truncated: 0,
+      artifact_excluded: 0,
+      project_documents: 0
+    }
   end
 
   defp ssh_list_files(hostname, dir, agent_type) do
@@ -489,7 +583,17 @@ defmodule CopilotLv.AgentDiscovery do
       Path.join(System.tmp_dir!(), "copilot_lv_import_#{:erlang.system_time(:millisecond)}")
 
     File.mkdir_p!(tmp_dir)
-    local_path = Path.join(tmp_dir, Path.basename(remote_path))
+
+    local_path =
+      case agent_type do
+        :gemini ->
+          chats_dir = Path.join(tmp_dir, "chats")
+          File.mkdir_p!(chats_dir)
+          Path.join(chats_dir, Path.basename(remote_path))
+
+        _ ->
+          Path.join(tmp_dir, Path.basename(remote_path))
+      end
 
     try do
       # For copilot, scp the whole directory; for others, just the file
@@ -502,11 +606,13 @@ defmodule CopilotLv.AgentDiscovery do
 
       case System.cmd("scp", scp_opts ++ [scp_src, local_path], stderr_to_stdout: true) do
         {_, 0} ->
+          stage_remote_sidecars(hostname, remote_path, local_path, agent_type, tmp_dir)
+
           case CopilotLv.Agents.parse_session(agent_type, local_path) do
             {:ok, parsed} ->
               # For Claude: fix cwd from remote path if local parse got temp dir
               parsed = maybe_fix_cwd(parsed, agent_type, remote_path)
-              do_import(parsed, agent_type, hostname, config_dir)
+              do_import(parsed, agent_type, hostname, config_dir, local_path)
 
             error ->
               error
@@ -517,6 +623,64 @@ defmodule CopilotLv.AgentDiscovery do
       end
     after
       File.rm_rf!(tmp_dir)
+    end
+  end
+
+  defp stage_remote_sidecars(hostname, remote_path, _local_path, :claude, tmp_dir) do
+    session_id = remote_path |> Path.basename() |> String.trim_trailing(".jsonl")
+    remote_project_dir = Path.dirname(remote_path)
+
+    scp_optional(
+      hostname,
+      Path.join(remote_project_dir, session_id),
+      Path.join(tmp_dir, session_id)
+    )
+
+    scp_optional(
+      hostname,
+      Path.join(remote_project_dir, "memory"),
+      Path.join(tmp_dir, "memory")
+    )
+  end
+
+  defp stage_remote_sidecars(hostname, remote_path, _local_path, :gemini, tmp_dir) do
+    remote_project_dir = remote_path |> Path.dirname() |> Path.dirname()
+    short_id = extract_remote_session_id(remote_path, :gemini)
+
+    command =
+      "find #{remote_project_dir}/tool-outputs -maxdepth 1 -type d -name 'session-*#{short_id}*' -print -quit 2>/dev/null"
+
+    case System.cmd("ssh", [hostname, command], stderr_to_stdout: true) do
+      {output, 0} ->
+        case String.trim(output) do
+          "" ->
+            :ok
+
+          remote_sidecar ->
+            local_tool_outputs = Path.join(tmp_dir, "tool-outputs")
+            File.mkdir_p!(local_tool_outputs)
+
+            scp_optional(
+              hostname,
+              remote_sidecar,
+              Path.join(local_tool_outputs, Path.basename(remote_sidecar))
+            )
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp stage_remote_sidecars(_hostname, _remote_path, _local_path, _agent_type, _tmp_dir),
+    do: :ok
+
+  defp scp_optional(hostname, remote_path, local_path) do
+    case System.cmd("scp", ["-r", "#{hostname}:#{remote_path}", local_path],
+           stderr_to_stdout: true
+         ) do
+      {_, 0} -> :ok
+      _ -> :ok
     end
   end
 

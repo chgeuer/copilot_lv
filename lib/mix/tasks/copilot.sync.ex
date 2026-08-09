@@ -46,6 +46,12 @@ defmodule Mix.Tasks.Copilot.Sync do
             #{stats.skipped} sessions skipped
             #{stats.errors} errors
             #{stats.events} total events
+            #{stats.artifacts} significant artifacts scanned
+            #{stats.artifact_added} artifacts added
+            #{stats.artifact_updated} artifacts updated
+            #{stats.artifact_removed} artifacts removed
+            #{stats.artifact_truncated} oversized artifacts stored as previews
+            #{stats.artifact_excluded} files excluded by policy
           """)
 
         {:error, msg} ->
@@ -71,6 +77,13 @@ defmodule Mix.Tasks.Copilot.Sync do
         #{stats.repaired} sessions repaired
         #{stats.skipped} sessions skipped
         #{stats.errors} errors
+        #{stats.artifact_candidates} significant artifacts scanned
+        #{stats.artifact_added} artifacts added
+        #{stats.artifact_updated} artifacts updated
+        #{stats.artifact_removed} artifacts removed
+        #{stats.artifact_truncated} oversized artifacts stored as previews
+        #{stats.artifact_excluded} files excluded by policy
+        #{stats.project_documents} project documents found
       """)
     end)
   end

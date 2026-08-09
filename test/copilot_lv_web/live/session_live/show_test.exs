@@ -4,7 +4,7 @@ defmodule CopilotLvWeb.SessionLive.ShowTest do
   import Phoenix.LiveViewTest
 
   alias CopilotLv.Repo
-  alias CopilotLv.Sessions.{Checkpoint, Event, Session, SessionArtifact}
+  alias CopilotLv.Sessions.{Checkpoint, Event, ProjectDocument, Session, SessionArtifact}
 
   test "renders imported checkpoints with compaction metadata and stored artifacts", %{conn: conn} do
     %{session: session, checkpoints: checkpoints, artifacts: artifacts} = create_session_fixture()
@@ -27,7 +27,7 @@ defmodule CopilotLvWeb.SessionLive.ShowTest do
     |> render_click()
 
     assert has_element?(view, "#artifact-detail", "Plan")
-    assert has_element?(view, "#artifact-content", "Add checkpoints inspector")
+    assert has_element?(view, "#artifact-content")
 
     view
     |> element("#artifact-#{workspace_artifact.id}")
@@ -73,6 +73,18 @@ defmodule CopilotLvWeb.SessionLive.ShowTest do
              "data-handoff-url=\"http://localhost:4001/api/sessions/#{session.id}/handoff.md\""
   end
 
+  test "groups project memory with session artifacts", %{conn: conn} do
+    %{session: session} = create_session_fixture(with_checkpoint?: false)
+    document = create_project_document!(session.agent, session.cwd)
+    on_exit(fn -> Ash.destroy!(document) end)
+
+    {:ok, view, _html} = live(conn, ~p"/session/#{session.id}")
+
+    assert has_element?(view, "#artifact-group-authored_document")
+    assert has_element?(view, "#artifact-group-project_memory")
+    assert has_element?(view, "#artifact-#{document.id}", "memory/MEMORY.md")
+  end
+
   defp create_session_fixture(opts \\ []) do
     provider_id = "test-inspector-#{System.unique_integer([:positive])}"
     session_id = Session.prefixed_id(:copilot, provider_id)
@@ -84,7 +96,7 @@ defmodule CopilotLvWeb.SessionLive.ShowTest do
       Session
       |> Ash.Changeset.for_create(:import, %{
         id: session_id,
-        cwd: "/tmp/copilot-lv/session-inspector",
+        cwd: "/tmp/copilot-lv/session-inspector/#{provider_id}",
         model: "gpt-5.4",
         summary: "# Imported inspector session",
         title: "Imported inspector session",
@@ -165,6 +177,23 @@ defmodule CopilotLvWeb.SessionLive.ShowTest do
       content_hash: content_hash(content),
       size: byte_size(content),
       artifact_type: artifact_type
+    })
+    |> Ash.create!()
+  end
+
+  defp create_project_document!(agent, project_key) do
+    ProjectDocument
+    |> Ash.Changeset.for_create(:upsert, %{
+      agent: agent,
+      project_key: project_key,
+      path: "memory/MEMORY.md",
+      source_path: "memory/MEMORY.md",
+      content: "# Project memory",
+      content_hash: content_hash("# Project memory"),
+      mime_type: "text/markdown",
+      original_size: 16,
+      stored_size: 16,
+      truncated: false
     })
     |> Ash.create!()
   end

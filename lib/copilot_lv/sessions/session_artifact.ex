@@ -16,6 +16,24 @@ defmodule CopilotLv.Sessions.SessionArtifact do
     attribute(:content_hash, :string, allow_nil?: false)
     attribute(:size, :integer, default: 0)
 
+    attribute(:category, :atom,
+      constraints: [
+        one_of: [:authored_document, :tool_output, :project_memory, :metadata, :other]
+      ]
+    )
+
+    attribute(:source_agent, :atom,
+      constraints: [one_of: [:copilot, :claude, :codex, :gemini, :pi]]
+    )
+
+    attribute(:source_path, :string)
+    attribute(:mime_type, :string)
+    attribute(:modified_at, :utc_datetime_usec)
+    attribute(:original_size, :integer)
+    attribute(:stored_size, :integer)
+    attribute(:truncated, :boolean, default: false)
+    attribute(:managed, :boolean, default: false)
+
     attribute(:artifact_type, :atom,
       constraints: [one_of: [:plan, :workspace, :file, :session_db_dump, :codex_thread_meta]],
       allow_nil?: false
@@ -34,18 +52,67 @@ defmodule CopilotLv.Sessions.SessionArtifact do
   end
 
   actions do
-    defaults([:read])
+    defaults([:read, :destroy])
 
     create :create do
       primary?(true)
-      accept([:path, :content, :content_hash, :size, :artifact_type, :session_id])
+
+      accept([
+        :path,
+        :content,
+        :content_hash,
+        :size,
+        :artifact_type,
+        :category,
+        :source_agent,
+        :source_path,
+        :mime_type,
+        :modified_at,
+        :original_size,
+        :stored_size,
+        :truncated,
+        :managed,
+        :session_id
+      ])
     end
 
     create :upsert do
-      accept([:path, :content, :content_hash, :size, :artifact_type, :session_id])
+      accept([
+        :path,
+        :content,
+        :content_hash,
+        :size,
+        :artifact_type,
+        :category,
+        :source_agent,
+        :source_path,
+        :mime_type,
+        :modified_at,
+        :original_size,
+        :stored_size,
+        :truncated,
+        :managed,
+        :session_id
+      ])
+
       upsert?(true)
       upsert_identity(:unique_path_per_session)
-      upsert_fields([:content, :content_hash, :size])
+
+      upsert_fields([
+        :content,
+        :content_hash,
+        :size,
+        :artifact_type,
+        :category,
+        :source_agent,
+        :source_path,
+        :mime_type,
+        :modified_at,
+        :original_size,
+        :stored_size,
+        :truncated,
+        :managed
+      ])
     end
 
     read :for_session do

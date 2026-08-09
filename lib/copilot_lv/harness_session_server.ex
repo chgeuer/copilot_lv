@@ -583,6 +583,8 @@ defmodule CopilotLv.HarnessSessionServer do
         timestamp: timestamp,
         sequence: state.sequence
       })
+
+      CopilotLv.ModelCatalog.observe_event_models(state.agent, [event])
     rescue
       e ->
         Logger.warning("Failed to persist event: #{Exception.message(e)}")
@@ -621,6 +623,7 @@ defmodule CopilotLv.HarnessSessionServer do
   defp persist_usage(state, entry) do
     try do
       Ash.create!(UsageEntry, Map.put(entry, :session_id, state.id))
+      CopilotLv.ModelCatalog.observe_model(state.agent, entry.model)
     rescue
       e ->
         Logger.warning("Failed to persist usage: #{Exception.message(e)}")

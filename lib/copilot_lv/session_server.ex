@@ -498,6 +498,8 @@ defmodule CopilotLv.SessionServer do
         timestamp: timestamp,
         sequence: state.sequence
       })
+
+      CopilotLv.ModelCatalog.observe_event_models(:copilot, [event])
     rescue
       e -> Logger.warning("Failed to persist event: #{inspect(e)}")
     end
@@ -528,6 +530,8 @@ defmodule CopilotLv.SessionServer do
         initiator: entry.initiator,
         duration_ms: entry.duration_ms
       })
+
+      CopilotLv.ModelCatalog.observe_model(:copilot, entry.model)
     rescue
       e -> Logger.warning("Failed to persist usage: #{inspect(e)}")
     end
@@ -545,6 +549,8 @@ defmodule CopilotLv.SessionServer do
             },
             action: :update_status
           )
+
+          CopilotLv.ModelCatalog.observe_model(:copilot, state.model)
 
         _ ->
           :ok

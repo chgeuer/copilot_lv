@@ -10,8 +10,9 @@ defmodule CopilotLv.ModelCatalog do
   ("Claude Fable 5").
 
   Discovery is relatively expensive (a scan over the `events` table), so the
-  result is computed once at application start via `refresh/0` and cached in a
-  `:persistent_term`. The selectors read the cached value through `for_agent/1`.
+  result is cached in a `:persistent_term`. Session, event, and usage writes
+  register newly observed models incrementally. Bulk database changes can
+  invalidate the cache so the next selector read repopulates it.
 
   Claude per-turn models are *not* stored in `sessions.model` (which is `NULL`
   for most Claude sessions); they live inside the event payload JSON. The
@@ -22,6 +23,7 @@ defmodule CopilotLv.ModelCatalog do
   require Logger
 
   @used_models_key {__MODULE__, :used_models}
+  @cache_lock {__MODULE__, :cache_lock}
 
   # Curated, currently-available models per agent as
   # `{display_name, cli_model_value, premium_multiplier}`. The `cli_model_value`
@@ -57,9 +59,12 @@ defmodule CopilotLv.ModelCatalog do
   """
   @spec refresh() :: :ok
   def refresh do
-    used = discover_used_models()
-    :persistent_term.put(@used_models_key, used)
-    Jido.GHCopilot.Models.register_session_models(Map.get(used, "copilot", []))
+    :global.trans(@cache_lock, fn ->
+      used = discover_used_models()
+      :persistent_term.put(@used_models_key, used)
+      Jido.GHCopilot.Models.register_session_models(Map.get(used, "copilot", []))
+    end)
+
     :ok
   rescue
     e ->
@@ -68,14 +73,67 @@ defmodule CopilotLv.ModelCatalog do
       :ok
   end
 
-  @doc "Returns the cached list of model ids used by `agent` in session history."
+  @doc "Invalidates the cached model list so the next read reloads it from the database."
+  @spec invalidate() :: :ok
+  def invalidate do
+    :global.trans(@cache_lock, fn -> :persistent_term.erase(@used_models_key) end)
+    :ok
+  end
+
+  @doc "Adds a newly observed model to the cached catalog without rescanning history."
+  @spec observe_model(atom() | String.t(), String.t() | nil) :: :ok
+  def observe_model(_agent, model) when not is_binary(model) or model == "", do: :ok
+
+  def observe_model(agent, model) when is_atom(agent),
+    do: observe_model(Atom.to_string(agent), model)
+
+  def observe_model(agent, model) when is_binary(agent) do
+    :global.trans(@cache_lock, fn ->
+      case :persistent_term.get(@used_models_key, :not_loaded) do
+        :not_loaded ->
+          :ok
+
+        used ->
+          updated = Map.update(used, agent, [model], &Enum.uniq([model | &1]))
+          :persistent_term.put(@used_models_key, updated)
+
+          if agent == "copilot" do
+            Jido.GHCopilot.Models.register_session_models(Map.fetch!(updated, agent))
+          end
+      end
+    end)
+
+    :ok
+  end
+
+  @doc "Adds model ids found in persisted event payloads to the cached catalog."
+  @spec observe_event_models(atom() | String.t(), [map()]) :: :ok
+  def observe_event_models(agent, events) do
+    events
+    |> Enum.map(&Map.get(&1, :data, Map.get(&1, "data", %{})))
+    |> Enum.map(&event_model/1)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.each(&observe_model(agent, &1))
+
+    :ok
+  end
+
+  @doc "Returns model ids used by `agent`, lazily refreshing an invalidated cache."
   @spec used_models(atom() | String.t()) :: [String.t()]
   def used_models(agent) when is_atom(agent), do: used_models(Atom.to_string(agent))
 
   def used_models(agent) when is_binary(agent) do
-    @used_models_key
-    |> :persistent_term.get(%{})
-    |> Map.get(agent, [])
+    used =
+      case :persistent_term.get(@used_models_key, :not_loaded) do
+        :not_loaded ->
+          refresh()
+          :persistent_term.get(@used_models_key, %{})
+
+        cached ->
+          cached
+      end
+
+    Map.get(used, agent, [])
   end
 
   @doc """
@@ -113,6 +171,25 @@ defmodule CopilotLv.ModelCatalog do
   # provider/placeholder values such as "openai", "<synthetic>", or bare aliases
   # ("haiku") that are already covered by the curated lists.
   defp model_id?(id), do: is_binary(id) and Regex.match?(~r/\d/, id)
+
+  defp event_model(data) when is_map(data) do
+    map_get(data, "model") ||
+      data |> map_get("data") |> map_get("model") ||
+      data |> map_get("message") |> map_get("model") ||
+      data |> map_get("data") |> map_get("message") |> map_get("model")
+  end
+
+  defp event_model(_data), do: nil
+
+  defp map_get(map, key) when is_map(map) do
+    Map.get(map, key) || Map.get(map, atom_key(key))
+  end
+
+  defp map_get(_map, _key), do: nil
+
+  defp atom_key("model"), do: :model
+  defp atom_key("data"), do: :data
+  defp atom_key("message"), do: :message
 
   @doc false
   @spec humanize(String.t()) :: String.t()
@@ -161,6 +238,11 @@ defmodule CopilotLv.ModelCatalog do
     SELECT agent, model FROM (
       SELECT agent AS agent, model AS model FROM sessions
         WHERE model IS NOT NULL AND model <> ''
+      UNION
+      SELECT s.agent AS agent, u.model AS model
+        FROM usage_entries u
+        JOIN sessions s ON s.id = u.session_id
+        WHERE u.model IS NOT NULL AND u.model <> ''
       UNION
       SELECT s.agent AS agent,
              COALESCE(json_extract(e.data, '$.model'),

@@ -34,6 +34,11 @@ defmodule CopilotLv.Sync do
         events: 0,
         checkpoints: 0,
         artifacts: 0,
+        artifact_added: 0,
+        artifact_updated: 0,
+        artifact_removed: 0,
+        artifact_truncated: 0,
+        artifact_excluded: 0,
         todos: 0
       }
 
@@ -41,23 +46,33 @@ defmodule CopilotLv.Sync do
       stats =
         Enum.reduce(session_dirs, stats, fn {session_id, dir_path}, stats ->
           case sync_session(session_id, dir_path, existing_ids, live_ids, verbose, dry_run) do
-            {:imported, event_count, cp_count, art_count, todo_count} ->
+            {:imported, event_count, cp_count, art_count, todo_count, artifact_metrics} ->
               %{
                 stats
                 | imported: stats.imported + 1,
                   events: stats.events + event_count,
                   checkpoints: stats.checkpoints + cp_count,
                   artifacts: stats.artifacts + art_count,
+                  artifact_added: stats.artifact_added + artifact_metrics.added,
+                  artifact_updated: stats.artifact_updated + artifact_metrics.updated,
+                  artifact_removed: stats.artifact_removed + artifact_metrics.removed,
+                  artifact_truncated: stats.artifact_truncated + artifact_metrics.truncated,
+                  artifact_excluded: stats.artifact_excluded + artifact_metrics.excluded,
                   todos: stats.todos + todo_count
               }
 
-            {:updated, event_count, cp_count, art_count, todo_count} ->
+            {:updated, event_count, cp_count, art_count, todo_count, artifact_metrics} ->
               %{
                 stats
                 | updated: stats.updated + 1,
                   events: stats.events + event_count,
                   checkpoints: stats.checkpoints + cp_count,
                   artifacts: stats.artifacts + art_count,
+                  artifact_added: stats.artifact_added + artifact_metrics.added,
+                  artifact_updated: stats.artifact_updated + artifact_metrics.updated,
+                  artifact_removed: stats.artifact_removed + artifact_metrics.removed,
+                  artifact_truncated: stats.artifact_truncated + artifact_metrics.truncated,
+                  artifact_excluded: stats.artifact_excluded + artifact_metrics.excluded,
                   todos: stats.todos + todo_count
               }
 
@@ -94,6 +109,8 @@ defmodule CopilotLv.Sync do
             {:ok, ss} -> ss
             _ -> %{}
           end
+
+        unless dry_run, do: CopilotLv.ModelCatalog.refresh()
 
         {:ok, Map.put(stats, :session_store_db, ss_stats)}
 
@@ -223,9 +240,12 @@ defmodule CopilotLv.Sync do
 
       if dry_run do
         checkpoints = read_checkpoints(dir_path)
-        artifacts = read_artifacts(dir_path)
+        artifact_report = read_artifact_report(dir_path)
+        artifacts = artifact_report.artifacts
         todos = read_session_todos(dir_path)
-        {:imported, length(raw_events), length(checkpoints), length(artifacts), length(todos)}
+
+        {:imported, length(raw_events), length(checkpoints), length(artifacts), length(todos),
+         artifact_metrics(nil, artifact_report)}
       else
         jido_session = %JidoSessions.Session{
           id: prefixed_id,
@@ -233,7 +253,7 @@ defmodule CopilotLv.Sync do
           source: :imported,
           status: :stopped,
           cwd: workspace["cwd"] || context["cwd"] || "unknown",
-          model: if(session_start, do: get_in(session_start, ["data", "selectedModel"])),
+          model: selected_model(raw_events),
           summary: summary,
           title: title,
           git_root: workspace["git_root"] || context["gitRoot"],
@@ -253,11 +273,14 @@ defmodule CopilotLv.Sync do
 
         checkpoints = read_checkpoints(dir_path)
         cp_count = import_checkpoints(prefixed_id, checkpoints)
-        artifacts = read_artifacts(dir_path)
+        artifact_report = read_artifact_report(dir_path)
+        artifacts = artifact_report.artifacts
         art_count = import_artifacts(prefixed_id, artifacts)
         todos = read_session_todos(dir_path)
         todo_count = import_session_todos(prefixed_id, todos)
-        {:imported, event_count, cp_count, art_count, todo_count}
+
+        {:imported, event_count, cp_count, art_count, todo_count,
+         artifact_metrics(nil, artifact_report)}
       end
     end
   end
@@ -290,12 +313,15 @@ defmodule CopilotLv.Sync do
           end
 
         # Always sync artifacts and todos for existing sessions (idempotent upsert)
-        artifacts = read_artifacts(dir_path)
+        artifact_report = read_artifact_report(dir_path)
+        artifacts = artifact_report.artifacts
         todos = read_session_todos(dir_path)
 
         if dry_run do
           new_events = Enum.drop(raw_events, existing_event_count)
-          {:updated, length(new_events), 0, length(artifacts), length(todos)}
+
+          {:updated, length(new_events), 0, length(artifacts), length(todos),
+           artifact_metrics(prefixed_id, artifact_report)}
         else
           new_events = Enum.drop(raw_events, existing_event_count)
 
@@ -306,6 +332,7 @@ defmodule CopilotLv.Sync do
               0
             end
 
+          metrics = artifact_metrics(prefixed_id, artifact_report)
           art_count = import_artifacts(prefixed_id, artifacts)
           todo_count = import_session_todos(prefixed_id, todos)
 
@@ -314,15 +341,18 @@ defmodule CopilotLv.Sync do
             existing
             | summary: summary,
               title: title,
+              model: selected_model(raw_events) || existing.model,
               status: :stopped
           }
 
           SessionStoreImpl.upsert_session(updated_session)
 
-          has_changes = event_count > 0 || art_count > 0 || todo_count > 0
+          has_changes =
+            event_count > 0 || art_count > 0 || todo_count > 0 ||
+              metrics.added > 0 || metrics.updated > 0 || metrics.removed > 0
 
           if has_changes do
-            {:updated, event_count, 0, art_count, todo_count}
+            {:updated, event_count, 0, art_count, todo_count, metrics}
           else
             :skipped
           end
@@ -404,13 +434,8 @@ defmodule CopilotLv.Sync do
   """
   def read_artifacts_for_agent(:claude, jsonl_path) when is_binary(jsonl_path) do
     session_id = jsonl_path |> Path.basename() |> String.trim_trailing(".jsonl")
-    session_dir = Path.join(Path.dirname(jsonl_path), session_id)
 
-    if File.dir?(session_dir) do
-      read_agent_session_dir(session_dir)
-    else
-      []
-    end
+    CopilotLv.ArtifactScanner.scan_session(:claude, session_id, jsonl_path).artifacts
   end
 
   def read_artifacts_for_agent(:copilot, dir_path) when is_binary(dir_path) do
@@ -421,87 +446,33 @@ defmodule CopilotLv.Sync do
     end
   end
 
-  def read_artifacts_for_agent(_agent, _path), do: []
+  def read_artifacts_for_agent(agent, source_path) when agent in [:gemini, :codex] do
+    session_id =
+      source_path
+      |> Path.basename()
+      |> String.replace(~r/^session-[\d\-T]+-/, "")
+      |> String.replace(~r/^rollout-[\d\-T]+-/, "")
+      |> Path.rootname()
 
-  # Read files from an agent's session subdirectory (tool-results, files, etc.)
-  defp read_agent_session_dir(session_dir) do
-    artifacts = []
-
-    # tool-results/* directory
-    tool_results_dir = Path.join(session_dir, "tool-results")
-
-    artifacts =
-      if File.dir?(tool_results_dir) do
-        read_files_from_dir(tool_results_dir, "tool-results") ++ artifacts
-      else
-        artifacts
-      end
-
-    # files/* directory (used by copilot/harness for pasted content)
-    files_dir = Path.join(session_dir, "files")
-
-    artifacts =
-      if File.dir?(files_dir) do
-        read_files_from_dir(files_dir, "files") ++ artifacts
-      else
-        artifacts
-      end
-
-    # Any other subdirectories with files can be added here
-
-    artifacts
+    CopilotLv.ArtifactScanner.scan_session(agent, session_id, source_path).artifacts
   end
+
+  def read_artifacts_for_agent(_agent, _path), do: []
 
   @doc """
   Reads artifact files from a session directory.
 
-  Scans for plan.md, workspace.yaml, files/*, tool-results/*, and session.db.
+  Recursively scans significant text documents in known session-owned paths and
+  serializes non-standard session.db tables.
   Returns a list of artifact maps with :path, :content, :content_hash, :size, :artifact_type.
   """
   def read_artifacts(dir_path) do
-    artifacts = []
+    read_artifact_report(dir_path).artifacts
+  end
 
-    # plan.md
-    plan_path = Path.join(dir_path, "plan.md")
-
-    artifacts =
-      if File.exists?(plan_path) do
-        content = File.read!(plan_path)
-        [make_artifact("plan.md", content, :plan) | artifacts]
-      else
-        artifacts
-      end
-
-    # workspace.yaml (raw content for round-trip)
-    ws_path = Path.join(dir_path, "workspace.yaml")
-
-    artifacts =
-      if File.exists?(ws_path) do
-        content = File.read!(ws_path)
-        [make_artifact("workspace.yaml", content, :workspace) | artifacts]
-      else
-        artifacts
-      end
-
-    # files/* directory (copilot sessions)
-    files_dir = Path.join(dir_path, "files")
-
-    artifacts =
-      if File.dir?(files_dir) do
-        read_files_from_dir(files_dir, "files") ++ artifacts
-      else
-        artifacts
-      end
-
-    # tool-results/* directory (Claude sessions via harness)
-    tool_results_dir = Path.join(dir_path, "tool-results")
-
-    artifacts =
-      if File.dir?(tool_results_dir) do
-        read_files_from_dir(tool_results_dir, "tool-results") ++ artifacts
-      else
-        artifacts
-      end
+  defp read_artifact_report(dir_path) do
+    session_id = Path.basename(dir_path)
+    report = CopilotLv.ArtifactScanner.scan_session(:copilot, session_id, dir_path)
 
     # session.db custom tables (non-standard tables serialized as JSON)
     db_path = Path.join(dir_path, "session.db")
@@ -509,38 +480,14 @@ defmodule CopilotLv.Sync do
     artifacts =
       if File.exists?(db_path) do
         case read_custom_db_tables(db_path) do
-          [] -> artifacts
-          tables -> [make_db_dump_artifact(tables) | artifacts]
+          [] -> report.artifacts
+          tables -> [make_db_dump_artifact(tables) | report.artifacts]
         end
       else
-        artifacts
+        report.artifacts
       end
 
-    artifacts
-  end
-
-  defp read_files_from_dir(dir, prefix) do
-    dir
-    |> File.ls!()
-    |> Enum.filter(&(!File.dir?(Path.join(dir, &1))))
-    |> Enum.map(fn filename ->
-      content = File.read!(Path.join(dir, filename))
-      make_artifact("#{prefix}/#{filename}", content, :file)
-    end)
-  rescue
-    _ -> []
-  end
-
-  defp make_artifact(path, content, type) do
-    hash = :crypto.hash(:sha256, content) |> Base.encode16(case: :lower)
-
-    %{
-      path: path,
-      content: content,
-      content_hash: hash,
-      artifact_type: type,
-      size: byte_size(content)
-    }
+    %{report | artifacts: artifacts}
   end
 
   defp make_db_dump_artifact(tables) do
@@ -552,7 +499,15 @@ defmodule CopilotLv.Sync do
       content: content,
       content_hash: hash,
       artifact_type: :session_db_dump,
-      size: byte_size(content)
+      category: :metadata,
+      source_agent: :copilot,
+      source_path: "session.db",
+      mime_type: "application/json",
+      size: byte_size(content),
+      original_size: byte_size(content),
+      stored_size: byte_size(content),
+      truncated: false,
+      managed: true
     }
   end
 
@@ -681,7 +636,7 @@ defmodule CopilotLv.Sync do
           source: :imported,
           status: :stopped,
           cwd: context["cwd"] || "unknown",
-          model: get_in(session_start, ["data", "selectedModel"]),
+          model: selected_model(raw_events),
           git_root: context["gitRoot"],
           branch: context["branch"],
           agent_version: get_in(session_start, ["data", "copilotVersion"]),
@@ -697,6 +652,10 @@ defmodule CopilotLv.Sync do
   end
 
   # ── Data Import ──
+
+  defp selected_model(raw_events) do
+    Enum.find_value(raw_events, &get_in(&1, ["data", "selectedModel"]))
+  end
 
   defp import_events(session_id, raw_events, offset \\ 0) do
     entries =
@@ -737,23 +696,33 @@ defmodule CopilotLv.Sync do
   end
 
   @doc "Imports a list of artifact maps into the DB for the given session."
-  def import_artifacts(session_id, artifacts) do
-    unless Enum.empty?(artifacts) do
-      art_structs =
-        Enum.map(artifacts, fn art ->
-          %JidoSessions.Artifact{
-            path: art.path,
-            artifact_type: art.artifact_type,
-            content: art.content,
-            content_hash: art.content_hash,
-            size: art.size
-          }
-        end)
-
-      SessionStoreImpl.upsert_artifacts(session_id, art_structs)
+  def import_artifacts(session_id, artifacts, agent \\ :copilot) do
+    case SessionStoreImpl.reconcile_artifacts(session_id, agent, artifacts) do
+      %{} -> length(artifacts)
+      {:error, reason} -> raise "artifact reconciliation failed: #{inspect(reason)}"
     end
+  end
 
-    length(artifacts)
+  defp artifact_metrics(nil, report) do
+    %{
+      added: length(report.artifacts),
+      updated: 0,
+      removed: 0,
+      truncated: Enum.count(report.artifacts, & &1.truncated),
+      excluded: Enum.sum(Map.values(report.excluded))
+    }
+  end
+
+  defp artifact_metrics(session_id, report) do
+    diff = SessionStoreImpl.artifact_diff(session_id, :copilot, report.artifacts)
+
+    %{
+      added: diff.added,
+      updated: diff.updated,
+      removed: diff.removed,
+      truncated: Enum.count(report.artifacts, & &1.truncated),
+      excluded: Enum.sum(Map.values(report.excluded))
+    }
   end
 
   defp import_session_todos(session_id, todos) do
