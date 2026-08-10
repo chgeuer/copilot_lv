@@ -2273,7 +2273,7 @@ defmodule CopilotLvWeb.SessionLive.Show do
   end
 
   defp push_file_tokens(socket, events) do
-    tokens =
+    text =
       events
       |> Enum.flat_map(fn event ->
         # Collect text from top-level event and from nested events inside tool groups
@@ -2286,13 +2286,18 @@ defmodule CopilotLvWeb.SessionLive.Show do
 
           [data["content"], data["result"], data["arguments"]]
           |> Enum.reject(&is_nil/1)
-          |> Enum.flat_map(fn text ->
-            CopilotLvWeb.FileViewer.scan_and_sign(CopilotLvWeb.Endpoint, text)
-            |> Map.to_list()
-          end)
+          |> Enum.flat_map(&file_token_texts/1)
         end)
       end)
-      |> Map.new()
+      |> Enum.uniq()
+      |> Enum.join("\n")
+
+    tokens =
+      CopilotLvWeb.FileViewer.scan_and_sign(
+        CopilotLvWeb.Endpoint,
+        text,
+        file_viewer_relative_image_bases(socket)
+      )
 
     if map_size(tokens) > 0 do
       push_event(socket, "file_tokens", %{tokens: tokens})
@@ -2302,7 +2307,12 @@ defmodule CopilotLvWeb.SessionLive.Show do
   end
 
   defp push_file_tokens_for_text(socket, text) when is_binary(text) do
-    tokens = CopilotLvWeb.FileViewer.scan_and_sign(CopilotLvWeb.Endpoint, text)
+    tokens =
+      CopilotLvWeb.FileViewer.scan_and_sign(
+        CopilotLvWeb.Endpoint,
+        text,
+        file_viewer_relative_image_bases(socket)
+      )
 
     if map_size(tokens) > 0 do
       push_event(socket, "file_tokens", %{tokens: tokens})
@@ -2310,6 +2320,17 @@ defmodule CopilotLvWeb.SessionLive.Show do
       socket
     end
   end
+
+  defp file_token_texts(value) when is_binary(value), do: [value]
+
+  defp file_token_texts(value) when is_map(value) do
+    value
+    |> Map.values()
+    |> Enum.flat_map(&file_token_texts/1)
+  end
+
+  defp file_token_texts(value) when is_list(value), do: Enum.flat_map(value, &file_token_texts/1)
+  defp file_token_texts(_value), do: []
 
   # ── Pasted Content Parsing ──
 
@@ -2404,15 +2425,18 @@ defmodule CopilotLvWeb.SessionLive.Show do
   # ── Paste File Management ──
 
   # Directories where agents may persist large tool outputs (e.g. <persisted-output>)
-  @agent_data_dirs [
-    Path.join(System.user_home!(), ".claude/projects"),
-    Path.join(System.user_home!(), ".copilot/session-state"),
-    Path.join(System.user_home!(), ".local/state/.copilot/session-state")
-  ]
-
   defp file_viewer_allowed_bases(socket) do
-    ([socket.assigns.cwd, socket.assigns.git_root] ++ @agent_data_dirs)
-    |> Enum.reject(&is_nil/1)
+    CopilotLvWeb.FileViewer.allowed_bases(%{
+      cwd: socket.assigns.cwd,
+      git_root: socket.assigns.git_root
+    })
+  end
+
+  defp file_viewer_relative_image_bases(socket) do
+    CopilotLvWeb.FileViewer.relative_image_bases(%{
+      cwd: socket.assigns.cwd,
+      git_root: socket.assigns.git_root
+    })
   end
 
   @session_state_dirs [

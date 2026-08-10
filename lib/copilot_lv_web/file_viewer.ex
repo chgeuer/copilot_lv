@@ -9,6 +9,12 @@ defmodule CopilotLvWeb.FileViewer do
 
   @salt "file-viewer-v1"
   @max_age 86_400
+  @image_extensions ~w(.avif .bmp .gif .jpeg .jpg .png .webp)
+  @agent_data_dirs [
+    Path.join(System.user_home!(), ".claude/projects"),
+    Path.join(System.user_home!(), ".copilot/session-state"),
+    Path.join(System.user_home!(), ".local/state/.copilot/session-state")
+  ]
 
   @doc "Sign a file path into an opaque token."
   def sign_path(endpoint, path) when is_binary(path) do
@@ -31,6 +37,20 @@ defmodule CopilotLvWeb.FileViewer do
       base = Path.expand(to_string(base))
       String.starts_with?(expanded, base <> "/") or expanded == base
     end)
+  end
+
+  @doc "Returns the filesystem roots that may be viewed for a session."
+  def allowed_bases(session) do
+    ([session.cwd, session.git_root] ++ @agent_data_dirs)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+  end
+
+  @doc "Returns the workspace roots searched when resolving relative image paths."
+  def relative_image_bases(session) do
+    [session.cwd, session.git_root]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
   end
 
   @doc """
@@ -63,7 +83,9 @@ defmodule CopilotLvWeb.FileViewer do
   - Markdown links with absolute paths like `[text](/home/user/file.ext)`
   - `<persisted-output>` blocks referencing saved-to file paths
   """
-  def scan_and_sign(endpoint, text) when is_binary(text) do
+  def scan_and_sign(endpoint, text, allowed_bases \\ [])
+
+  def scan_and_sign(endpoint, text, allowed_bases) when is_binary(text) do
     # Match http://localhost:PORT/absolute-path patterns
     localhost_regex = ~r/https?:\/\/localhost:\d+(\/\S+?(?:\.\w{1,10}))(?=[)\s"'\]>]|$)/
 
@@ -113,9 +135,10 @@ defmodule CopilotLvWeb.FileViewer do
     localhost_tokens
     |> Map.merge(abspath_tokens)
     |> Map.merge(persisted_output_tokens)
+    |> Map.merge(relative_image_tokens(endpoint, text, allowed_bases))
   end
 
-  def scan_and_sign(_endpoint, _non_binary), do: %{}
+  def scan_and_sign(_endpoint, _non_binary, _allowed_bases), do: %{}
 
   @doc "Detect the language for syntax highlighting based on file extension."
   def detect_language(path) do
@@ -145,5 +168,76 @@ defmodule CopilotLvWeb.FileViewer do
       ".cs" -> "csharp"
       _ -> "plaintext"
     end
+  end
+
+  defp relative_image_tokens(endpoint, text, allowed_bases) do
+    image_regex = ~r/!\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+["'][^"']*["'])?\s*\)/
+
+    image_regex
+    |> Regex.scan(text)
+    |> Enum.map(fn [_full, source] -> source end)
+    |> Enum.uniq()
+    |> Enum.reduce(%{}, fn source, tokens ->
+      case resolve_relative_image(source, allowed_bases) do
+        {:ok, path} ->
+          Map.put(tokens, source, %{token: sign_path(endpoint, path), path: path})
+
+        :error ->
+          tokens
+      end
+    end)
+  end
+
+  defp resolve_relative_image(source, allowed_bases) do
+    with %URI{scheme: nil, host: nil, path: path} when is_binary(path) <- URI.parse(source),
+         decoded <- URI.decode(path),
+         normalized when is_binary(normalized) <- normalize_image_reference(decoded),
+         true <- safe_relative_image_path?(normalized),
+         path when is_binary(path) <- find_relative_file(normalized, allowed_bases) do
+      {:ok, path}
+    else
+      _ -> :error
+    end
+  rescue
+    ArgumentError -> :error
+  end
+
+  defp safe_relative_image_path?(path) do
+    path != "" and
+      Path.extname(path) |> String.downcase() |> then(&(&1 in @image_extensions)) and
+      not String.contains?(path, ["*", "?", "[", "{", "\\"])
+  end
+
+  defp normalize_image_reference(path) do
+    path
+    |> String.trim_leading("/")
+    |> Path.split()
+    |> Enum.reduce([], fn
+      segment, parts when segment in ["", "."] -> parts
+      "..", [_parent | parts] -> parts
+      "..", [] -> []
+      segment, parts -> [segment | parts]
+    end)
+    |> Enum.reverse()
+    |> Path.join()
+  end
+
+  defp find_relative_file(relative_path, allowed_bases) do
+    Enum.find_value(allowed_bases, fn base ->
+      base = Path.expand(to_string(base))
+
+      [
+        Path.join(base, relative_path),
+        Path.join([base, "*", relative_path]),
+        Path.join([base, "*", "*", relative_path])
+      ]
+      |> Enum.find_value(fn pattern ->
+        pattern
+        |> Path.wildcard()
+        |> Enum.find(fn path ->
+          File.regular?(path) and path_allowed?(path, allowed_bases)
+        end)
+      end)
+    end)
   end
 end

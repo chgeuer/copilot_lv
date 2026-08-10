@@ -29,6 +29,7 @@ import {
   MarkdownContent, CopyMarkdown, UserMessage, ToolGroup, AutoScroll,
   configureSessionViewer
 } from "jido_tool_renderers/session_viewer_hooks"
+import {rewriteFileImages} from "./file_images.mjs"
 import {XtermSession} from "../vendor/xterm_hook"
 
 // ── CtrlClick hook for multi-select rows ──
@@ -87,17 +88,63 @@ function rewriteFileLinks(container, tokenMap, hook) {
   }
 }
 
+function rewriteSessionFileImages(container, tokenMap) {
+  const sessionMatch = window.location.pathname.match(/^\/session\/([^/]+)/)
+  if (!sessionMatch) return
+
+  rewriteFileImages(container, tokenMap, sessionMatch[1])
+}
+
 configureSessionViewer({
   postRender(container, hook) {
     rewriteFileLinks(container, hook._fileTokens, hook)
+    rewriteSessionFileImages(container, hook._fileTokens)
   }
 })
+
+function renderBeforeAttach(hook) {
+  const render = hook.render
+
+  return {
+    ...hook,
+    render() {
+      const liveElement = this.el
+      const detachedElement = liveElement.cloneNode(false)
+
+      if (!detachedElement.hasAttribute("data-markdown")) {
+        detachedElement.textContent = liveElement.textContent
+      }
+
+      this.el = detachedElement
+
+      try {
+        render.call(this)
+        liveElement.className = detachedElement.className
+        liveElement.replaceChildren(...detachedElement.childNodes)
+      } finally {
+        this.el = liveElement
+      }
+    }
+  }
+}
+
+const DeferredMarkdownContent = renderBeforeAttach(MarkdownContent)
+const DeferredUserMessage = renderBeforeAttach(UserMessage)
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks, AutoScroll, MarkdownContent, CopyMarkdown, UserMessage, ToolGroup, XtermSession, CtrlClick},
+  hooks: {
+    ...colocatedHooks,
+    AutoScroll,
+    MarkdownContent: DeferredMarkdownContent,
+    CopyMarkdown,
+    UserMessage: DeferredUserMessage,
+    ToolGroup,
+    XtermSession,
+    CtrlClick
+  },
 })
 
 // Show progress bar on live navigation and form submits
@@ -148,4 +195,3 @@ if (process.env.NODE_ENV === "development") {
     window.liveReloader = reloader
   })
 }
-

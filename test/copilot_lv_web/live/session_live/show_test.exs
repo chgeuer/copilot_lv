@@ -85,6 +85,41 @@ defmodule CopilotLvWeb.SessionLive.ShowTest do
     assert has_element?(view, "#artifact-#{document.id}", "memory/MEMORY.md")
   end
 
+  test "pushes signed tokens for relative images in tool results", %{conn: conn} do
+    %{session: session} = create_session_fixture(with_checkpoint?: false, with_artifacts?: false)
+    image_path = Path.join([session.cwd, "bookmarks", "images", "example.png"])
+    File.mkdir_p!(Path.dirname(image_path))
+    File.write!(image_path, "png")
+    on_exit(fn -> File.rm_rf!(session.cwd) end)
+
+    create_event!(session.id, 2, "tool.execution_start", %{
+      "arguments" => %{"command" => "render bookmark"},
+      "toolCallId" => "image-tool",
+      "toolName" => "bash"
+    })
+
+    create_event!(session.id, 3, "tool.execution_complete", %{
+      "result" => %{"content" => "![Example](images/example.png)"},
+      "success" => true,
+      "toolCallId" => "image-tool",
+      "toolName" => "bash"
+    })
+
+    {:ok, view, _html} = live(conn, ~p"/session/#{session.id}")
+
+    assert_push_event(view, "file_tokens", %{tokens: tokens}, 1_000)
+
+    assert %{
+             "images/example.png" => %{
+               path: ^image_path,
+               token: token
+             }
+           } = tokens
+
+    assert {:ok, ^image_path} =
+             CopilotLvWeb.FileViewer.verify_token(CopilotLvWeb.Endpoint, token)
+  end
+
   defp create_session_fixture(opts \\ []) do
     provider_id = "test-inspector-#{System.unique_integer([:positive])}"
     session_id = Session.prefixed_id(:copilot, provider_id)
@@ -199,26 +234,30 @@ defmodule CopilotLvWeb.SessionLive.ShowTest do
   end
 
   defp insert_compaction_event(session_id) do
+    create_event!(session_id, 1, "session.compaction_complete", %{
+      "checkpointNumber" => 2,
+      "checkpointPath" => "/tmp/copilot-lv/checkpoints/002-latest-context.md",
+      "compactionTokensUsed" => %{
+        "cachedInput" => 24_000,
+        "input" => 157_329,
+        "output" => 3_400
+      },
+      "preCompactionMessagesLength" => 42,
+      "preCompactionTokens" => 134_606,
+      "requestId" => "req-123",
+      "success" => true,
+      "summaryContent" => "<overview>Second summary</overview>"
+    })
+  end
+
+  defp create_event!(session_id, sequence, event_type, data) do
     Event
     |> Ash.Changeset.for_create(:create, %{
       session_id: session_id,
-      event_type: "session.compaction_complete",
-      sequence: 1,
-      timestamp: ~U[2026-03-08 15:00:00Z],
-      data: %{
-        "checkpointNumber" => 2,
-        "checkpointPath" => "/tmp/copilot-lv/checkpoints/002-latest-context.md",
-        "compactionTokensUsed" => %{
-          "cachedInput" => 24_000,
-          "input" => 157_329,
-          "output" => 3_400
-        },
-        "preCompactionMessagesLength" => 42,
-        "preCompactionTokens" => 134_606,
-        "requestId" => "req-123",
-        "success" => true,
-        "summaryContent" => "<overview>Second summary</overview>"
-      }
+      event_type: event_type,
+      sequence: sequence,
+      timestamp: DateTime.add(~U[2026-03-08 15:00:00Z], sequence, :second),
+      data: data
     })
     |> Ash.create!()
   end

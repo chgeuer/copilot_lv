@@ -23,6 +23,7 @@ defmodule CopilotLvWeb.Router do
 
     live "/", SessionLive.Index, :index
     live "/session/:id", SessionLive.Show, :show
+    get "/sessions/:id/files/:token", SessionFileController, :show
     live "/sync", SyncLive.Index, :index
   end
 
